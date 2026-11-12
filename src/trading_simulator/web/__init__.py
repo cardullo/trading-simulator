@@ -1,0 +1,1 @@
+"""Web interface (Streamlit) for the Trading Simulator."""

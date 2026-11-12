@@ -1,0 +1,1 @@
+"""`solve` subcommand implementation (stub)."""

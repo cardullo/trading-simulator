@@ -1,0 +1,23 @@
+{
+  "instrument": {
+    "symbol": "EUR/USD",
+    "pip_size": 0.0001,
+    "contract_size": 100000
+  },
+  "account": {
+    "initial_balance": 1000.0,
+    "risk_per_trade": 0.01
+  },
+  "risk": {
+    "sl_pips": 10,
+    "tp_pips": 30,
+    "fee_pips": 1,
+    "compounding_mode": "standard"
+  },
+  "activity": {
+    "trades_per_day": 10,
+    "win_rate": 0.55,
+    "days": 30
+  },
+  "seed": 42
+}
