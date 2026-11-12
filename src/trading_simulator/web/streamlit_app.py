@@ -270,12 +270,12 @@ def render_run_tab(inputs):
             with e1:
                 rid = st.session_state.get("last_run_id", "temp")
                 cd = export_csv([asdict(t) for t in result.trades], Path(f"/tmp/run_{rid}.csv"))
-                cb = cd.read_bytes() if hasattr(cd, "read_bytes") else csv_data
-                st.download_button("⬇️ Export CSV", data=cb, file_name=f"run_{rid}.csv", mime="text/csv", key=f"csv_{rid}")
+                cb = cd.read_bytes() if hasattr(cd, "read_bytes") else cd
+                st.download_button("⬇️ Export CSV", data=cb, file_name=f"run_{rid}.csv", mime="text/csv", key=f"csv_{uuid.uuid4().hex[:12]}")
             with e2:
                 jd = export_json([asdict(t) for t in result.trades], Path(f"/tmp/run_{rid}.json"))
                 jb = jd.read_bytes() if hasattr(jd, "read_bytes") else jd
-                st.download_button("⬇️ Export JSON", data=jb, file_name=f"run_{rid}.json", mime="application/json", key=f"json_{rid}")
+                st.download_button("⬇️ Export JSON", data=jb, file_name=f"run_{rid}.json", mime="application/json", key=f"json_{uuid.uuid4().hex[:12]}")
 
 
 def render_saved_runs_tab():
@@ -335,11 +335,11 @@ def render_saved_runs_tab():
                 with e1:
                     csv_data = export_csv(trades, Path(f"/tmp/run_{run_id_input}.csv"))
                     cb = csv_data.read_bytes() if hasattr(csv_data, "read_bytes") else csv_data
-                    st.download_button("⬇️ Export CSV", data=cb, file_name=f"run_{run_id_input}.csv", mime="text/csv", key=f"csv_{run_id_input}")
+                    st.download_button("⬇️ Export CSV", data=cb, file_name=f"run_{run_id_input}.csv", mime="text/csv", key=f"csv_{uuid.uuid4().hex[:12]}")
                 with e2:
                     jd = export_json(trades, Path(f"/tmp/run_{run_id_input}.json"))
                     jb = jd.read_bytes() if hasattr(jd, "read_bytes") else jd
-                    st.download_button("⬇️ Export JSON", data=jb, file_name=f"run_{run_id_input}.json", mime="application/json", key=f"json_{run_id_input}")
+                    st.download_button("⬇️ Export JSON", data=jb, file_name=f"run_{run_id_input}.json", mime="application/json", key=f"json_{uuid.uuid4().hex[:12]}")
 
 
 def render_comparison_tab():
