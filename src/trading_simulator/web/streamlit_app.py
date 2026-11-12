@@ -84,7 +84,29 @@ def make_comparison_chart(results, title="Multi-Run Comparison"):
     return fig
 def make_trades_table(trades):
     if not trades: return []
-    return [{"Trade #": t.trade_number, "Day": t.day, "Lots": f"{t.lots:.4f}", "Pips Net": f"{t.pips_net:+.2f}", "Profit (€)": f"{t.profit_euros:+.2f}", "Balance (€)": f"{t.balance_after:,.2f}", "Outcome": t.outcome} for t in trades]
+    rows = []
+    for t in trades:
+        if isinstance(t, dict):
+            rows.append({
+                "Trade #": t.get("trade_number", t.get("id", "")),
+                "Day": t.get("day", ""),
+                "Lots": f"{t.get('lots', 0):.4f}",
+                "Pips Net": f"{t.get('pips_net', 0):+.2f}",
+                "Profit (€)": f"{t.get('profit_euros', 0):+.2f}",
+                "Balance (€)": f"{t.get('balance_after', 0):,.2f}",
+                "Outcome": t.get("outcome", ""),
+            })
+        else:
+            rows.append({
+                "Trade #": t.trade_number,
+                "Day": t.day,
+                "Lots": f"{t.lots:.4f}",
+                "Pips Net": f"{t.pips_net:+.2f}",
+                "Profit (€)": f"{t.profit_euros:+.2f}",
+                "Balance (€)": f"{t.balance_after:,.2f}",
+                "Outcome": t.outcome,
+            })
+    return rows
 def highlight_outcome(val):
     if val == "WIN": return "color: #2ca02c; font-weight: bold"
     if val == "LOSS": return "color: #d62728; font-weight: bold"
@@ -307,7 +329,7 @@ def render_saved_runs_tab():
                 st.subheader("Recent Trades (Last 20)")
                 trades_data = make_trades_table(trades[-20:])
                 df = pd.DataFrame(trades_data)
-                styled = df.style.applymap(highlight_outcome, subset=["Outcome"])
+                styled = df.style.map(highlight_outcome, subset=["Outcome"])
                 st.dataframe(styled, use_container_width=True, hide_index=True)
                 e1, e2 = st.columns(2)
                 with e1:
