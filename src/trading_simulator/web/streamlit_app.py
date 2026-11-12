@@ -242,7 +242,7 @@ def render_run_tab(inputs):
         if trades_data:
             import pandas as pd
             df = pd.DataFrame(trades_data)
-            styled = df.style.applymap(highlight_outcome, subset=["Outcome"])
+            styled = df.style.map(highlight_outcome, subset=["Outcome"])
             st.dataframe(styled, use_container_width=True, hide_index=True)
             e1, e2 = st.columns(2)
             with e1:
