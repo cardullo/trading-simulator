@@ -1,6 +1,7 @@
 """Streamlit web interface for Trading Simulation & Goal-Modeling Platform."""
 from __future__ import annotations
 import json, uuid
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 import plotly.graph_objects as go
@@ -83,7 +84,7 @@ def make_comparison_chart(results, title="Multi-Run Comparison"):
     return fig
 def make_trades_table(trades):
     if not trades: return []
-    return [{"Trade #": t["trade_number"], "Day": t["day"], "Lots": f"{t['lots']:.4f}", "Pips Net": f"{t['pips_net']:+.2f}", "Profit (€)": f"{t['profit_euros']:+.2f}", "Balance (€)": f"{t['balance_after']:,.2f}", "Outcome": t["outcome"]} for t in trades]
+    return [{"Trade #": t.trade_number, "Day": t.day, "Lots": f"{t.lots:.4f}", "Pips Net": f"{t.pips_net:+.2f}", "Profit (€)": f"{t.profit_euros:+.2f}", "Balance (€)": f"{t.balance_after:,.2f}", "Outcome": t.outcome} for t in trades]
 def highlight_outcome(val):
     if val == "WIN": return "color: #2ca02c; font-weight: bold"
     if val == "LOSS": return "color: #d62728; font-weight: bold"
@@ -246,11 +247,11 @@ def render_run_tab(inputs):
             e1, e2 = st.columns(2)
             with e1:
                 rid = st.session_state.get("last_run_id", "temp")
-                cd = export_csv([dict(t) for t in result.trades], Path(f"/tmp/run_{rid}.csv"))
+                cd = export_csv([asdict(t) for t in result.trades], Path(f"/tmp/run_{rid}.csv"))
                 cb = cd.read_bytes() if hasattr(cd, "read_bytes") else cd
                 st.download_button("⬇️ Export CSV", data=cb, file_name=f"run_{rid}.csv", mime="text/csv")
             with e2:
-                jd = export_json([dict(t) for t in result.trades], Path(f"/tmp/run_{rid}.json"))
+                jd = export_json([asdict(t) for t in result.trades], Path(f"/tmp/run_{rid}.json"))
                 jb = jd.read_bytes() if hasattr(jd, "read_bytes") else jd
                 st.download_button("⬇️ Export JSON", data=jb, file_name=f"run_{rid}.json", mime="application/json")
 
