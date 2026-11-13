@@ -255,7 +255,7 @@ class TestCliInspectWithRun:
         assert result.exit_code == 0
         # Run ID is truncated in Rich table, check for partial match
         assert run_id[:6] in result.output
-        assert "+37.04%" in result.output
+        assert "+35.09%" in result.output
 
     def test_inspect_detail(self):
         """Inspect <RUN_ID> should show detailed run info."""

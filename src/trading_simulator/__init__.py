@@ -11,11 +11,14 @@ from trading_simulator.config import (
     AccountConfig,
     SimulationConfig,
     OutcomeMode,
+    PricePathMode,
     PyramidConfig,
     PyramidMode,
     TrailingStopConfig,
     TPHitConfig,
     TPHitMode,
+    LeverageConfig,
+    ExecutionConfig,
 )
 from trading_simulator.models import Account, Instrument, Trade, TradeResult, EquityPoint
 from trading_simulator.lot_sizing import calculate_lot_size, validate_lot_size, LotSizingResult
@@ -23,6 +26,9 @@ from trading_simulator.compounding import compute_risk_base
 from trading_simulator.engine import SimulationEngine, SimulationResult
 from trading_simulator.analytics import (
     PerformanceMetrics,
+    QuantMetrics,
+    compute_quant_metrics,
+    compute_monte_carlo_drawdown,
     aggregate_daily,
     aggregate_weekly,
     aggregate_monthly,
@@ -37,6 +43,7 @@ __version__ = "0.1.5"
 __all__ = [
     "CompoundingMode",
     "OutcomeMode",
+    "PricePathMode",
     "PyramidMode",
     "InstrumentConfig",
     "RiskConfig",
@@ -46,6 +53,8 @@ __all__ = [
     "TrailingStopConfig",
     "TPHitConfig",
     "TPHitMode",
+    "LeverageConfig",
+    "ExecutionConfig",
     "Account",
     "Instrument",
     "Trade",
@@ -58,6 +67,9 @@ __all__ = [
     "SimulationEngine",
     "SimulationResult",
     "PerformanceMetrics",
+    "QuantMetrics",
+    "compute_quant_metrics",
+    "compute_monte_carlo_drawdown",
     "aggregate_daily",
     "aggregate_weekly",
     "aggregate_monthly",

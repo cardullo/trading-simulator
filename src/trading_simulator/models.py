@@ -12,11 +12,12 @@ class Instrument:
     symbol: str = "EUR/USD"
     pip_size: float = 0.0001
     contract_size: int = 100_000
+    quote_to_account_rate: float = 1.0
 
     @property
     def pip_value_per_lot(self) -> float:
-        """Value of 1 pip for 1 lot (in quote currency)."""
-        return self.contract_size * self.pip_size
+        """Value of 1 pip for 1 lot (in account currency)."""
+        return self.contract_size * self.pip_size * self.quote_to_account_rate
 
 
 @dataclass

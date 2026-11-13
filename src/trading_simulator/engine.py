@@ -16,6 +16,7 @@ step, the engine checks exit conditions in order:
 
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -24,6 +25,7 @@ from typing import Literal
 from trading_simulator.config import (
     CompoundingMode,
     OutcomeMode,
+    PricePathMode,
     PyramidMode,
     SimulationConfig,
     TPHitMode,
@@ -42,6 +44,9 @@ class SimulationResult:
     max_drawdown_pct: float = 0.0
     win_rate_actual: float = 0.0
     profit_factor: float = 0.0
+    margin_calls: int = 0
+    stop_outs: int = 0
+    margin_rejections: int = 0
 
 
 class SimulationEngine:
@@ -69,6 +74,7 @@ class SimulationEngine:
             symbol=config.instrument.symbol,
             pip_size=float(config.instrument.pip_size),
             contract_size=config.instrument.contract_size,
+            quote_to_account_rate=config.instrument.quote_to_account_rate,
         )
         # Cache frequently accessed values
         self._pip_value_per_lot = self.instrument.pip_value_per_lot
@@ -80,6 +86,8 @@ class SimulationEngine:
         self._win_rate = config.activity.win_rate
         self._trades_per_day = config.activity.trades_per_day
         self._tp_levels = config.risk.tp_levels
+        self._price_path_mode = config.activity.price_path_mode
+        self._pullback_prob = config.activity.pullback_prob
 
         # Pyramid entry configuration
         self._pyramid_enabled = config.pyramid.enabled
@@ -89,6 +97,7 @@ class SimulationEngine:
         self._pyramid_lot_size = config.pyramid.lot_size
         self._pyramid_lot_pct = config.pyramid.lot_pct
         self._pyramid_be_trigger_pips = config.pyramid.be_trigger_pips
+        self._pyramid_be_offset_pips = config.pyramid.be_offset_pips
 
         # Trailing stop configuration
         self._trailing_enabled = config.trailing_stop.enabled
@@ -102,10 +111,37 @@ class SimulationEngine:
         self._tp_hit_pct = config.tp_hit.hit_pct
         self._tp_levels_to_hit = set()
 
+        # Leverage & Margin configuration
+        self._leverage_enabled = config.leverage.enabled
+        self._leverage = config.leverage.leverage
+        self._margin_call_pct = config.leverage.margin_call_pct
+        self._stop_out_pct = config.leverage.stop_out_pct
+        self._max_lot_exposure = config.leverage.max_lot_exposure
+
+        self.margin_calls: int = 0
+        self.stop_outs: int = 0
+        self.margin_rejections: int = 0
+
+        # Execution Friction (spread, slippage, swaps)
+        self._execution_enabled = config.execution.enabled
+        self._variable_spread_enabled = config.execution.variable_spread_enabled
+        self._base_spread_pips = config.execution.base_spread_pips
+        self._spread_std_pips = config.execution.spread_std_pips
+        self._slippage_enabled = config.execution.slippage_enabled
+        self._sl_slippage_mean_pips = config.execution.sl_slippage_mean_pips
+        self._sl_slippage_std_pips = config.execution.sl_slippage_std_pips
+        self._tp_slippage_improvement_prob = config.execution.tp_slippage_improvement_prob
+        self._tp_slippage_mean_pips = config.execution.tp_slippage_mean_pips
+        self._swap_enabled = config.execution.swap_enabled
+        self._swap_long_pips = config.execution.swap_long_pips
+        self._holding_nights = config.execution.holding_nights
+        self._triple_swap_day = config.execution.triple_swap_day
+
         self.trades: list[Trade] = []
         self.equity_curve: list[EquityPoint] = []
         self._day = 1
         self._position_counter = 0
+        self._current_position_trades: list[Trade] = []
 
     def run(self, days: int | None = None) -> SimulationResult:
         """Run the simulation for the given number of days."""
@@ -193,6 +229,9 @@ class SimulationEngine:
         tp_level_hit: bool = True,
         tp_level_pips: float = 0.0,
         balance_before_override: float | None = None,
+        trailing_stop_active: bool = False,
+        trailing_stop_pips: float = 0.0,
+        trailing_triggered: bool = False,
     ) -> None:
         """Record a single fill (partial or full position exit/add)."""
         balance_before = balance_before_override if balance_before_override is not None else self.account.balance
@@ -221,25 +260,25 @@ class SimulationEngine:
             position_avg_price=round(position_avg_price, 4),
             tp_level_hit=tp_level_hit,
             tp_level_pips=round(tp_level_pips, 4),
+            trailing_stop_active=trailing_stop_active,
+            trailing_stop_pips=round(trailing_stop_pips, 4),
+            trailing_triggered=trailing_triggered,
         )
         self.trades.append(trade)
+        self._current_position_trades.append(trade)
 
         # Update fill indices for all trades in this position
-        position_trades = [i for i, t in enumerate(self.trades) if t.position_id == position_id]
-        for idx, trade_idx in enumerate(position_trades):
-            self.trades[trade_idx].fill_index = idx
-            self.trades[trade_idx].total_fills = len(position_trades)
-            self.trades[trade_idx].pyramid_fill_index = idx
-            self.trades[trade_idx].pyramid_total_fills = len(position_trades)
+        total_pos_fills = len(self._current_position_trades)
+        for idx, t in enumerate(self._current_position_trades):
+            t.fill_index = idx
+            t.total_fills = total_pos_fills
+            t.pyramid_fill_index = idx
+            t.pyramid_total_fills = total_pos_fills
 
     def _execute_trade(self) -> None:
         # Stop trading if balance is zero or negative
         if self.account.balance <= 0:
             return
-
-        self._position_counter += 1
-        position_id = f"pos_{self._position_counter}"
-        base_outcome = self._determine_outcome()
 
         risk_base_result = compute_risk_base(
             mode=self._compounding_mode,
@@ -259,6 +298,21 @@ class SimulationEngine:
             max_lot=None,
         ).lots
 
+        # Leverage & Margin checks on position entry
+        if self._leverage_enabled:
+            if self._max_lot_exposure is not None and lots > self._max_lot_exposure:
+                self.margin_rejections += 1
+                return
+            required_margin = (lots * self.config.instrument.contract_size) / self._leverage
+            if required_margin > self.account.balance:
+                self.margin_rejections += 1
+                return
+
+        self._position_counter += 1
+        self._current_position_trades = []
+        position_id = f"pos_{self._position_counter}"
+        base_outcome = self._determine_outcome()
+
         # Base entry price in absolute terms (EUR/USD simulation)
         base_entry_price = 1.0800
         entry_price = base_entry_price
@@ -267,6 +321,29 @@ class SimulationEngine:
         total_lots = lots
         total_cost_basis = base_entry_price * lots
         sl_price = base_entry_price - (self._sl_pips * 0.0001)
+        position_balance_before = self.account.balance
+
+        # Execution friction parameters for this trade
+        effective_fee = self._fee_pips
+        if self._execution_enabled and self._variable_spread_enabled:
+            spread_jitter = abs(self.rng.gauss(0.0, self._spread_std_pips))
+            effective_fee += self._base_spread_pips + spread_jitter
+
+        swap_pips = 0.0
+        if self._execution_enabled and self._swap_enabled and self._holding_nights > 0:
+            for night in range(self._holding_nights):
+                dow = ((self._day - 1 + night) % 7) + 1
+                multiplier = 3 if dow == self._triple_swap_day else 1
+                swap_pips += self._swap_long_pips * multiplier
+
+        sl_slip = 0.0
+        if self._execution_enabled and self._slippage_enabled:
+            sl_slip = max(0.0, self.rng.gauss(self._sl_slippage_mean_pips, self._sl_slippage_std_pips))
+
+        tp_slip = 0.0
+        if self._execution_enabled and self._slippage_enabled:
+            if self.rng.random() < self._tp_slippage_improvement_prob:
+                tp_slip = max(0.0, self.rng.gauss(self._tp_slippage_mean_pips, self._tp_slippage_mean_pips * 0.5))
 
         tp_levels = list(self._tp_levels) if self._tp_levels else []
         tp_hits = {i: False for i in range(len(tp_levels))}
@@ -282,9 +359,11 @@ class SimulationEngine:
         trailing_active = False
         trailing_stop_price = None
         trailing_triggered = False
+        trailing_partial_done = False
         be_moved = False
         pyramid_adds = 0
         pyramid_last_add_price = base_entry_price
+        margin_call_triggered = False
 
         max_steps = 10000
         step = 0
@@ -309,10 +388,10 @@ class SimulationEngine:
             target_price = base_entry_price - (self._sl_pips * 0.0001)
             direction = -1  # downward toward SL
 
-        # Track whether we need deferred P&L calculation (pyramid/trailing only)
+        # Track whether we need deferred P&L calculation (pyramid only)
         # When pyramid is enabled, it handles the position with deferred P&L.
-        # When only TP levels are used (without pyramiding), each TP fill realizes P&L immediately.
-        self._deferred_pnl = self._pyramid_enabled or (self._trailing_enabled and not tp_levels)
+        # Trailing stop without pyramiding records closing deals sequentially.
+        self._deferred_pnl = self._pyramid_enabled
 
         # Record initial position open fill when M11 features are active
         if self._deferred_pnl:
@@ -334,7 +413,12 @@ class SimulationEngine:
         while not position_closed and step < max_steps:
             step += 1
 
-            current_price += direction * 0.0001
+            if self._price_path_mode == PricePathMode.STOCHASTIC:
+                # With pullback_prob, move against direction; otherwise with direction
+                step_dir = -direction if self.rng.random() < self._pullback_prob else direction
+                current_price += step_dir * 0.0001
+            else:
+                current_price += direction * 0.0001
 
             # Cap at target to prevent overshoot
             if direction == 1 and current_price > target_price:
@@ -343,6 +427,62 @@ class SimulationEngine:
                 current_price = target_price
 
             unrealized_pips = (current_price - entry_price) / 0.0001
+
+            # Check Leverage & Margin (Margin Call & Stop-Out Liquidation)
+            if self._leverage_enabled:
+                total_margin = (total_lots * self.config.instrument.contract_size) / self._leverage
+                floating_pnl = unrealized_pips * total_lots * self._pip_value_per_lot
+                equity = self.account.balance + floating_pnl
+                margin_level_pct = (equity / total_margin) * 100.0 if total_margin > 0 else float("inf")
+
+                if margin_level_pct <= self._margin_call_pct and not margin_call_triggered:
+                    self.margin_calls += 1
+                    margin_call_triggered = True
+
+                if margin_level_pct <= self._stop_out_pct:
+                    self.stop_outs += 1
+                    close_price = current_price
+                    so_slip = sl_slip if (self._execution_enabled and self._slippage_enabled) else 0.0
+                    close_pips = ((close_price - base_entry_price) / 0.0001 - so_slip) if self._deferred_pnl else ((close_price - entry_price) / 0.0001 - so_slip)
+
+                    if self._deferred_pnl:
+                        position_trades = list(self._current_position_trades)
+                        position_trades.sort(key=lambda t: t.fill_index)
+                        balance_before_position = self.account.balance
+                        for idx, t in enumerate(position_trades):
+                            t.pips_gross = round(close_pips - t.entry_price, 4)
+                            t.fee_pips = round(effective_fee, 4) if idx == 0 else 0.0
+                            t.pips_net = round(
+                                t.pips_gross - t.fee_pips + (swap_pips if idx == 0 else 0.0), 4
+                            )
+                            t.profit_euros = round(t.pips_net * t.lots * self._pip_value_per_lot, 4)
+                            t.balance_before = round(balance_before_position, 4)
+                            t.balance_after = round(balance_before_position + t.profit_euros, 4)
+                            t.outcome = "LOSS"
+                            balance_before_position = t.balance_after
+                    else:
+                        existing_fills = len(self._current_position_trades)
+                        fee_applied = round(effective_fee, 4) if existing_fills == 0 else 0.0
+                        close_pips_net = round(close_pips - fee_applied + (swap_pips if existing_fills == 0 else 0.0), 4)
+                        profit = round(close_pips_net * total_lots * self._pip_value_per_lot, 4)
+                        self._record_fill(
+                            position_id=position_id,
+                            fill_index=existing_fills,
+                            total_fills=0,
+                            lots=total_lots,
+                            pips_gross=close_pips,
+                            pips_net=close_pips_net,
+                            fee_pips=fee_applied,
+                            profit_euros=profit,
+                            entry_price=entry_price,
+                            position_avg_price=total_cost_basis / total_lots if total_lots > 0 else entry_price,
+                            outcome="LOSS",
+                            close_price=close_price,
+                            balance_before_override=position_balance_before,
+                        )
+                        position_balance_before = round(position_balance_before + profit, 4)
+                    position_closed = True
+                    break
 
             # Check Take Profit levels
             # Each TP level closes its allocated lots (hit=profit, miss=0 profit)
@@ -369,20 +509,18 @@ class SimulationEngine:
                     # Calculate fill lots: exact allocation
                     fill_lots = round(lots * (tp_level.allocation_pct / 100.0), 2)
 
-                    fill_fee_pips = self._fee_pips if i == 0 else 0.0
+                    fill_fee_pips = round(effective_fee, 4) if i == 0 else 0.0
                     if hit_this_level:
                         tp_hits[i] = True
-                        fill_pips = tp_level.pips - fill_fee_pips
-                        profit = fill_pips * fill_lots * self._pip_value_per_lot
+                        fill_pips = round(tp_level.pips + tp_slip - fill_fee_pips + (swap_pips if i == 0 else 0.0), 4)
+                        profit = round(fill_pips * fill_lots * self._pip_value_per_lot, 4)
                     else:
                         tp_hits[i] = True
                         fill_fee_pips = 0.0
                         fill_pips = 0.0
                         profit = 0.0
 
-                    existing_fills = sum(
-                        1 for t in self.trades if t.position_id == position_id
-                    )
+                    existing_fills = len(self._current_position_trades)
                     self._record_fill(
                         position_id=position_id,
                         fill_index=existing_fills,
@@ -419,25 +557,21 @@ class SimulationEngine:
             # If reached target price, close position (for non-TP trades or remaining lots)
             if direction == 1 and current_price >= target_price:
                 close_price = current_price
-                close_pips = (close_price - base_entry_price) / 0.0001
+                close_pips = (close_price - base_entry_price) / 0.0001 + tp_slip
 
                 if self._deferred_pnl:
                     # Update all fills' pips_gross and balance chain based on close price
-                    position_trades = [
-                        t for t in self.trades if t.position_id == position_id
-                    ]
+                    position_trades = list(self._current_position_trades)
                     # Sort by fill_index to process in order
                     position_trades.sort(key=lambda t: t.fill_index)
-                    running_balance = self.account.balance
-                    # Recalculate: subtract all previous profits to get balance before this position
-                    for t in position_trades:
-                        running_balance -= t.profit_euros
-                    balance_before_position = running_balance
+                    balance_before_position = self.account.balance
                     # Now apply profits in order
-                    for t in position_trades:
+                    for idx, t in enumerate(position_trades):
                         t.pips_gross = round(close_pips - t.entry_price, 4)
-                        t.fee_pips = self._fee_pips
-                        t.pips_net = round(t.pips_gross - t.fee_pips, 4)
+                        t.fee_pips = round(effective_fee, 4) if idx == 0 else 0.0
+                        t.pips_net = round(
+                            t.pips_gross - t.fee_pips + (swap_pips if idx == 0 else 0.0), 4
+                        )
                         t.profit_euros = round(t.pips_net * t.lots * self._pip_value_per_lot, 4)
                         t.balance_before = round(balance_before_position, 4)
                         t.balance_after = round(balance_before_position + t.profit_euros, 4)
@@ -445,11 +579,10 @@ class SimulationEngine:
                     # Balance is updated at end of _execute_trade (line 669)
                     # to avoid double counting
                 else:
-                    close_pips_net = close_pips - self._fee_pips
-                    profit = close_pips_net * total_lots * self._pip_value_per_lot
-                    existing_fills = sum(
-                        1 for t in self.trades if t.position_id == position_id
-                    )
+                    existing_fills = len(self._current_position_trades)
+                    fee_applied = round(effective_fee, 4) if existing_fills == 0 else 0.0
+                    close_pips_net = round(close_pips - fee_applied + (swap_pips if existing_fills == 0 else 0.0), 4)
+                    profit = round(close_pips_net * total_lots * self._pip_value_per_lot, 4)
                     self._record_fill(
                         position_id=position_id,
                         fill_index=existing_fills,
@@ -457,41 +590,65 @@ class SimulationEngine:
                         lots=total_lots,
                         pips_gross=close_pips,
                         pips_net=close_pips_net,
-                        fee_pips=self._fee_pips,
+                        fee_pips=fee_applied,
                         profit_euros=profit,
-                        entry_price=entry_price,
-                        position_avg_price=total_cost_basis / total_lots if total_lots > 0 else entry_price,
+                        entry_price=base_entry_price,
+                        position_avg_price=total_cost_basis / total_lots if total_lots > 0 else base_entry_price,
                         outcome=base_outcome,
                         close_price=close_price,
+                        trailing_stop_active=trailing_active,
+                        trailing_stop_pips=self._trailing_distance_pips if trailing_active else 0.0,
+                        trailing_triggered=trailing_triggered,
+                        balance_before_override=position_balance_before,
                     )
-                close_price = close_price
+                    position_balance_before = round(position_balance_before + profit, 4)
                 position_closed = True
                 break
 
             unrealized_pips = (current_price - entry_price) / 0.0001
 
-            # Check Stop Loss hit (for LOSS trades moving down)
-            if base_outcome == "LOSS" and current_price <= sl_price and not be_moved:
-                close_pips = (sl_price - entry_price) / 0.0001
-                close_pips_net = close_pips - self._fee_pips
-                profit = close_pips_net * total_lots * self._pip_value_per_lot
-                existing_fills = sum(
-                    1 for t in self.trades if t.position_id == position_id
-                )
-                self._record_fill(
-                    position_id=position_id,
-                    fill_index=existing_fills,
-                    total_fills=0,
-                    lots=total_lots,
-                    pips_gross=close_pips,
-                    pips_net=close_pips_net,
-                    fee_pips=self._fee_pips,
-                    profit_euros=profit,
-                    entry_price=entry_price,
-                    position_avg_price=total_cost_basis / total_lots if total_lots > 0 else entry_price,
-                    outcome="LOSS",
-                    close_price=sl_price,
-                )
+            # Check Stop Loss hit (for LOSS trades moving down or stochastic pullbacks hitting SL)
+            if current_price <= sl_price and not be_moved:
+                close_pips = (sl_price - base_entry_price) / 0.0001 - sl_slip
+                if self._deferred_pnl and not trailing_partial_done:
+                    position_trades = list(self._current_position_trades)
+                    position_trades.sort(key=lambda t: t.fill_index)
+                    balance_before_position = self.account.balance
+                    for idx, t in enumerate(position_trades):
+                        t.pips_gross = round(close_pips - t.entry_price, 4)
+                        t.fee_pips = round(effective_fee, 4) if idx == 0 else 0.0
+                        t.pips_net = round(
+                            t.pips_gross - t.fee_pips + (swap_pips if idx == 0 else 0.0), 4
+                        )
+                        t.profit_euros = round(t.pips_net * t.lots * self._pip_value_per_lot, 4)
+                        t.balance_before = round(balance_before_position, 4)
+                        t.balance_after = round(balance_before_position + t.profit_euros, 4)
+                        t.outcome = "LOSS"
+                        balance_before_position = t.balance_after
+                else:
+                    existing_fills = len(self._current_position_trades)
+                    fee_applied = round(effective_fee, 4) if existing_fills == 0 else 0.0
+                    close_pips_net = round(close_pips - fee_applied + (swap_pips if existing_fills == 0 else 0.0), 4)
+                    profit = round(close_pips_net * total_lots * self._pip_value_per_lot, 4)
+                    self._record_fill(
+                        position_id=position_id,
+                        fill_index=existing_fills,
+                        total_fills=0,
+                        lots=total_lots,
+                        pips_gross=close_pips,
+                        pips_net=close_pips_net,
+                        fee_pips=fee_applied,
+                        profit_euros=profit,
+                        entry_price=base_entry_price,
+                        position_avg_price=total_cost_basis / total_lots if total_lots > 0 else base_entry_price,
+                        outcome="LOSS",
+                        close_price=sl_price,
+                        trailing_stop_active=trailing_active,
+                        trailing_stop_pips=self._trailing_distance_pips if trailing_active else 0.0,
+                        trailing_triggered=trailing_triggered,
+                        balance_before_override=position_balance_before,
+                    )
+                    position_balance_before = round(position_balance_before + profit, 4)
                 close_price = sl_price
                 position_closed = True
                 break
@@ -499,26 +656,46 @@ class SimulationEngine:
             # Check breakeven SL after BE move
             if be_moved and trailing_stop_price is not None:
                 if current_price <= trailing_stop_price:
-                    close_pips = (trailing_stop_price - entry_price) / 0.0001
-                    close_pips_net = close_pips - self._fee_pips
-                    profit = close_pips_net * total_lots * self._pip_value_per_lot
-                    existing_fills = sum(
-                        1 for t in self.trades if t.position_id == position_id
-                    )
-                    self._record_fill(
-                        position_id=position_id,
-                        fill_index=existing_fills,
-                        total_fills=0,
-                        lots=total_lots,
-                        pips_gross=close_pips,
-                        pips_net=close_pips_net,
-                        fee_pips=self._fee_pips,
-                        profit_euros=profit,
-                        entry_price=entry_price,
-                        position_avg_price=total_cost_basis / total_lots if total_lots > 0 else entry_price,
-                        outcome="LOSS",
-                        close_price=trailing_stop_price,
-                    )
+                    close_pips = (trailing_stop_price - base_entry_price) / 0.0001 - sl_slip
+                    if self._deferred_pnl and not trailing_partial_done:
+                        position_trades = list(self._current_position_trades)
+                        position_trades.sort(key=lambda t: t.fill_index)
+                        balance_before_position = self.account.balance
+                        for idx, t in enumerate(position_trades):
+                            t.pips_gross = round(close_pips - t.entry_price, 4)
+                            t.fee_pips = round(effective_fee, 4) if idx == 0 else 0.0
+                            t.pips_net = round(
+                                t.pips_gross - t.fee_pips + (swap_pips if idx == 0 else 0.0), 4
+                            )
+                            t.profit_euros = round(t.pips_net * t.lots * self._pip_value_per_lot, 4)
+                            t.balance_before = round(balance_before_position, 4)
+                            t.balance_after = round(balance_before_position + t.profit_euros, 4)
+                            t.outcome = "WIN" if t.profit_euros >= 0 else "LOSS"
+                            balance_before_position = t.balance_after
+                    else:
+                        existing_fills = len(self._current_position_trades)
+                        fee_applied = round(effective_fee, 4) if existing_fills == 0 else 0.0
+                        close_pips_net = round(close_pips - fee_applied + (swap_pips if existing_fills == 0 else 0.0), 4)
+                        profit = round(close_pips_net * total_lots * self._pip_value_per_lot, 4)
+                        self._record_fill(
+                            position_id=position_id,
+                            fill_index=existing_fills,
+                            total_fills=0,
+                            lots=total_lots,
+                            pips_gross=close_pips,
+                            pips_net=close_pips_net,
+                            fee_pips=fee_applied,
+                            profit_euros=profit,
+                            entry_price=base_entry_price,
+                            position_avg_price=total_cost_basis / total_lots if total_lots > 0 else base_entry_price,
+                            outcome="WIN" if profit >= 0 else "LOSS",
+                            close_price=trailing_stop_price,
+                            trailing_stop_active=trailing_active,
+                            trailing_stop_pips=self._trailing_distance_pips if trailing_active else 0.0,
+                            trailing_triggered=trailing_triggered,
+                            balance_before_override=position_balance_before,
+                        )
+                        position_balance_before = round(position_balance_before + profit, 4)
                     close_price = trailing_stop_price
                     position_closed = True
                     break
@@ -527,15 +704,13 @@ class SimulationEngine:
                 break
 
             if not position_closed and base_outcome == "WIN" and self._trailing_enabled:
-                if not trailing_triggered and unrealized_pips >= self._trailing_activate_pips:
+                if not trailing_active and unrealized_pips >= self._trailing_activate_pips:
                     trailing_active = True
                     trailing_stop_price = current_price - (self._trailing_distance_pips * 0.0001)
-                    trailing_triggered = True
                     # Update all existing fills in this position to mark trailing active
-                    for t in self.trades:
-                        if t.position_id == position_id:
-                            t.trailing_stop_active = True
-                            t.trailing_stop_pips = self._trailing_distance_pips
+                    for t in self._current_position_trades:
+                        t.trailing_stop_active = True
+                        t.trailing_stop_pips = self._trailing_distance_pips
 
                 if trailing_active:
                     new_trailing = current_price - (self._trailing_distance_pips * 0.0001)
@@ -543,15 +718,23 @@ class SimulationEngine:
                         trailing_stop_price = new_trailing
 
                     if current_price <= trailing_stop_price:
-                        close_pips = (trailing_stop_price - entry_price) / 0.0001
-                        close_pips_net = close_pips - self._fee_pips
+                        close_pips = (trailing_stop_price - base_entry_price) / 0.0001
+                        existing_fills = len(self._current_position_trades)
+                        fee_applied = round(effective_fee, 4) if existing_fills == 0 else 0.0
+                        close_pips_net = round(close_pips - fee_applied + (swap_pips if existing_fills == 0 else 0.0), 4)
 
-                        if self._trailing_partial_close_pct > 0:
-                            close_lots = total_lots * (self._trailing_partial_close_pct / 100.0)
-                            profit = close_pips_net * close_lots * self._pip_value_per_lot
-                            existing_fills = sum(
-                                1 for t in self.trades if t.position_id == position_id
-                            )
+                        # Mark all trades in this position as trailing_triggered
+                        for t in self._current_position_trades:
+                            t.trailing_triggered = True
+
+                        if self._trailing_partial_close_pct > 0 and not trailing_partial_done:
+                            close_lots = round(total_lots * (self._trailing_partial_close_pct / 100.0), 2)
+                            if close_lots < 0.01:
+                                close_lots = 0.01
+                            if close_lots > total_lots:
+                                close_lots = total_lots
+                            profit = round(close_pips_net * close_lots * self._pip_value_per_lot, 4)
+                            existing_fills = len(self._current_position_trades)
                             self._record_fill(
                                 position_id=position_id,
                                 fill_index=existing_fills,
@@ -559,38 +742,68 @@ class SimulationEngine:
                                 lots=close_lots,
                                 pips_gross=close_pips,
                                 pips_net=close_pips_net,
-                                fee_pips=self._fee_pips,
+                                fee_pips=fee_applied,
                                 profit_euros=profit,
-                                entry_price=entry_price,
-                                position_avg_price=total_cost_basis / total_lots if total_lots > 0 else entry_price,
-                                outcome="WIN",
+                                entry_price=base_entry_price,
+                                position_avg_price=total_cost_basis / total_lots if total_lots > 0 else base_entry_price,
+                                outcome="WIN" if profit >= 0 else "LOSS",
                                 close_price=trailing_stop_price,
+                                trailing_stop_active=True,
+                                trailing_stop_pips=self._trailing_distance_pips,
+                                trailing_triggered=True,
+                                balance_before_override=position_balance_before,
                             )
+                            position_balance_before = round(position_balance_before + profit, 4)
                             remaining_lots -= close_lots
                             total_lots -= close_lots
+                            trailing_partial_done = True
+                            # For the remaining lots, adjust stop price so it doesn't immediately re-trigger
+                            trailing_stop_price = current_price - (self._trailing_distance_pips * 0.0001)
                             if remaining_lots <= 0.001:
                                 close_price = trailing_stop_price
                                 position_closed = True
                                 break
                         else:
-                            profit = close_pips_net * total_lots * self._pip_value_per_lot
-                            existing_fills = sum(
-                                1 for t in self.trades if t.position_id == position_id
-                            )
-                            self._record_fill(
-                                position_id=position_id,
-                                fill_index=existing_fills,
-                                total_fills=0,
-                                lots=total_lots,
-                                pips_gross=close_pips,
-                                pips_net=close_pips_net,
-                                fee_pips=self._fee_pips,
-                                profit_euros=profit,
-                                entry_price=entry_price,
-                                position_avg_price=total_cost_basis / total_lots if total_lots > 0 else entry_price,
-                                outcome="WIN",
-                                close_price=trailing_stop_price,
-                            )
+                            if self._deferred_pnl and not trailing_partial_done:
+                                position_trades = list(self._current_position_trades)
+                                position_trades.sort(key=lambda t: t.fill_index)
+                                balance_before_position = self.account.balance
+                                for idx, t in enumerate(position_trades):
+                                    t.pips_gross = round(close_pips - t.entry_price, 4)
+                                    t.fee_pips = round(effective_fee, 4) if idx == 0 else 0.0
+                                    t.pips_net = round(
+                                        t.pips_gross - t.fee_pips + (swap_pips if idx == 0 else 0.0), 4
+                                    )
+                                    t.profit_euros = round(t.pips_net * t.lots * self._pip_value_per_lot, 4)
+                                    t.balance_before = round(balance_before_position, 4)
+                                    t.balance_after = round(balance_before_position + t.profit_euros, 4)
+                                    t.trailing_stop_active = True
+                                    t.trailing_stop_pips = self._trailing_distance_pips
+                                    t.trailing_triggered = True
+                                    t.outcome = "WIN" if t.profit_euros >= 0 else "LOSS"
+                                    balance_before_position = t.balance_after
+                            else:
+                                profit = round(close_pips_net * total_lots * self._pip_value_per_lot, 4)
+                                existing_fills = len(self._current_position_trades)
+                                self._record_fill(
+                                    position_id=position_id,
+                                    fill_index=existing_fills,
+                                    total_fills=0,
+                                    lots=total_lots,
+                                    pips_gross=close_pips,
+                                    pips_net=close_pips_net,
+                                    fee_pips=fee_applied,
+                                    profit_euros=profit,
+                                    entry_price=base_entry_price,
+                                    position_avg_price=total_cost_basis / total_lots if total_lots > 0 else base_entry_price,
+                                    outcome="WIN" if profit >= 0 else "LOSS",
+                                    close_price=trailing_stop_price,
+                                    trailing_stop_active=True,
+                                    trailing_stop_pips=self._trailing_distance_pips,
+                                    trailing_triggered=True,
+                                    balance_before_override=position_balance_before,
+                                )
+                                position_balance_before = round(position_balance_before + profit, 4)
                             close_price = trailing_stop_price
                             position_closed = True
                             break
@@ -604,6 +817,24 @@ class SimulationEngine:
                         add_lots = lots * (self._pyramid_lot_pct / 100.0)
                     else:
                         add_lots = self._pyramid_lot_size
+
+                    # Enforce broker minimum lot (0.01) and step alignment (0.01) with floor truncation
+                    add_lots = math.floor(add_lots / 0.01 + 1e-9) * 0.01
+                    add_lots = round(add_lots, 2)
+                    if add_lots < 0.01:
+                        add_lots = 0.01
+
+                    # Leverage & Margin check for pyramid add
+                    if self._leverage_enabled:
+                        if self._max_lot_exposure is not None and (total_lots + add_lots) > self._max_lot_exposure:
+                            continue
+                        add_margin = (add_lots * self.config.instrument.contract_size) / self._leverage
+                        current_margin = (total_lots * self.config.instrument.contract_size) / self._leverage
+                        floating_pnl = unrealized_pips * total_lots * self._pip_value_per_lot
+                        equity = self.account.balance + floating_pnl
+                        free_margin = equity - current_margin
+                        if free_margin < add_margin:
+                            continue
 
                     # Save old entry price (VWAP average before this add)
                     old_entry_price = entry_price
@@ -623,9 +854,7 @@ class SimulationEngine:
                     pyramid_last_add_price = current_price
                     pyramid_adds += 1
 
-                    existing_fills = sum(
-                        1 for t in self.trades if t.position_id == position_id
-                    )
+                    existing_fills = len(self._current_position_trades)
                     # entry_price as pips offset from base_entry_price
                     avg_offset = (new_avg - base_entry_price) / 0.0001
                     self._record_fill(
@@ -648,44 +877,63 @@ class SimulationEngine:
                         and not be_moved
                         and unrealized_pips >= self._pyramid_be_trigger_pips
                     ):
-                        sl_price = entry_price
+                        sl_price = entry_price + (self._pyramid_be_offset_pips * 0.0001)
                         be_moved = True
-                        trailing_stop_price = entry_price
+                        trailing_stop_price = sl_price
 
             if not position_closed and not be_moved and self._pyramid_be_trigger_pips is not None:
                 if unrealized_pips >= self._pyramid_be_trigger_pips:
-                    sl_price = entry_price
+                    sl_price = entry_price + (self._pyramid_be_offset_pips * 0.0001)
                     be_moved = True
-                    trailing_stop_price = entry_price
+                    trailing_stop_price = sl_price
 
         if not position_closed:
-            close_pips = (current_price - entry_price) / 0.0001
-            close_pips_net = close_pips - self._fee_pips
-            profit = close_pips_net * total_lots * self._pip_value_per_lot
-            existing_fills = sum(
-                1 for t in self.trades if t.position_id == position_id
-            )
-            self._record_fill(
-                position_id=position_id,
-                fill_index=existing_fills,
-                total_fills=0,
-                lots=total_lots,
-                pips_gross=close_pips,
-                pips_net=close_pips_net,
-                fee_pips=self._fee_pips,
-                profit_euros=profit,
-                entry_price=entry_price,
-                position_avg_price=total_cost_basis / total_lots if total_lots > 0 else entry_price,
-                outcome=base_outcome,
-                close_price=current_price,
-            )
+            close_pips = (current_price - base_entry_price) / 0.0001
+            if self._deferred_pnl and not trailing_partial_done:
+                position_trades = list(self._current_position_trades)
+                position_trades.sort(key=lambda t: t.fill_index)
+                balance_before_position = self.account.balance
+                for idx, t in enumerate(position_trades):
+                    t.pips_gross = round(close_pips - t.entry_price, 4)
+                    t.fee_pips = round(effective_fee, 4) if idx == 0 else 0.0
+                    t.pips_net = round(
+                        t.pips_gross - t.fee_pips + (swap_pips if idx == 0 else 0.0), 4
+                    )
+                    t.profit_euros = round(t.pips_net * t.lots * self._pip_value_per_lot, 4)
+                    t.balance_before = round(balance_before_position, 4)
+                    t.balance_after = round(balance_before_position + t.profit_euros, 4)
+                    t.outcome = "WIN" if t.profit_euros >= 0 else "LOSS"
+                    balance_before_position = t.balance_after
+            else:
+                existing_fills = len(self._current_position_trades)
+                fee_applied = round(effective_fee, 4) if existing_fills == 0 else 0.0
+                close_pips_net = round(close_pips - fee_applied + (swap_pips if existing_fills == 0 else 0.0), 4)
+                profit = round(close_pips_net * total_lots * self._pip_value_per_lot, 4)
+                self._record_fill(
+                    position_id=position_id,
+                    fill_index=existing_fills,
+                    total_fills=0,
+                    lots=total_lots,
+                    pips_gross=close_pips,
+                    pips_net=close_pips_net,
+                    fee_pips=fee_applied,
+                    profit_euros=profit,
+                    entry_price=base_entry_price,
+                    position_avg_price=total_cost_basis / total_lots if total_lots > 0 else base_entry_price,
+                    outcome=base_outcome,
+                    close_price=current_price,
+                    trailing_stop_active=trailing_active,
+                    trailing_stop_pips=self._trailing_distance_pips if trailing_active else 0.0,
+                    trailing_triggered=trailing_triggered,
+                    balance_before_override=position_balance_before,
+                )
+                position_balance_before = round(position_balance_before + profit, 4)
             close_price = current_price
 
         # Always update account balance with position profit (win or loss)
         position_profit = sum(
             t.profit_euros
-            for t in self.trades
-            if t.position_id == position_id
+            for t in self._current_position_trades
         )
         self.account.balance += position_profit
         if self.account.balance > self.account.peak_balance:
@@ -713,5 +961,8 @@ class SimulationEngine:
             max_drawdown_pct=max((e.drawdown_pct for e in self.equity_curve), default=0.0),
             win_rate_actual=len(winning_trades) / len(self.trades) if self.trades else 0.0,
             profit_factor=(gross_profit / gross_loss) if gross_loss > 0 else float("inf") if gross_profit > 0 else 0.0,
+            margin_calls=self.margin_calls,
+            stop_outs=self.stop_outs,
+            margin_rejections=self.margin_rejections,
         )
         return result

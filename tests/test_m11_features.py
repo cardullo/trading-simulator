@@ -269,6 +269,39 @@ class TestTrailingStop:
         errors = verify_profit_math(trades)
         assert not errors, f"Profit math errors: {errors}"
 
+    def test_trailing_stop_triggers_in_stochastic_mode(self):
+        """Task 1.3: Prove trailing stop actually triggers when price experiences pullbacks in stochastic mode."""
+        from trading_simulator.config import PricePathMode
+        engine = run_engine(
+            trailing_stop={"enabled": True, "activate_pips": 10.0,
+                           "distance_pips": 5.0, "partial_close_pct": 0.0},
+            activity={
+                "trades_per_day": 5, "win_rate": 1.0, "days": 3,
+                "outcome_mode": OutcomeMode.FIXED_WINS_FIRST,
+                "price_path_mode": PricePathMode.STOCHASTIC,
+                "pullback_prob": 0.35,
+            },
+            risk={"sl_pips": 10.0, "tp_pips": 50.0, "fee_pips": 1.0,
+                  "compounding_mode": CompoundingMode.NONE},
+            seed=42,
+        )
+        trades = engine.trades
+        # Verify that trailing stop actually triggered on at least one trade
+        triggered_trades = [t for t in trades if t.trailing_triggered]
+        assert len(triggered_trades) > 0, "Trailing stop should trigger in stochastic mode"
+        for t in triggered_trades:
+            assert t.trailing_stop_active is True
+            assert t.trailing_stop_pips == 5.0
+            # Exited below full 50-pip TP because trailing stop captured the gain on pullback
+            assert t.pips_gross < 50.0
+            assert t.pips_gross >= 5.0  # Must be at least activate - distance
+
+        # Verify math and balance chain integrity
+        errors = verify_balance_chain(trades, 1000.0)
+        assert not errors, f"Balance chain errors: {errors}"
+        errors = verify_profit_math(trades)
+        assert not errors, f"Profit math errors: {errors}"
+
 
 class TestTPHitSimulation:
     """M11.3 TP Hit Simulation — fixed/random/percent modes."""
@@ -425,3 +458,22 @@ class TestM11CombinedFeatures:
         trades = engine.trades
         for t in trades:
             assert t.balance_after >= 0, f"Trade {t.trade_number}: negative balance {t.balance_after}"
+
+    def test_pyramid_min_lot_clamping(self):
+        """Task 5.4: Verify pyramid adds on micro-lot positions are clamped to >= 0.01 and step-aligned."""
+        engine = run_engine(
+            account={"initial_balance": 50.0, "risk_per_trade": 0.005},
+            pyramid={"enabled": True, "trigger_pips": 5.0, "max_adds": 2,
+                     "lot_mode": PyramidMode.PERCENT, "lot_size": 0.01,
+                     "lot_pct": 10.0, "be_trigger_pips": None},
+            risk={"sl_pips": 10.0, "tp_pips": 30.0, "fee_pips": 1.0,
+                  "compounding_mode": CompoundingMode.NONE},
+            activity={"trades_per_day": 1, "win_rate": 1.0, "days": 1,
+                      "outcome_mode": OutcomeMode.FIXED_WINS_FIRST},
+        )
+        trades = engine.trades
+        pos_trades = [t for t in trades if t.position_id == "pos_1"]
+        assert len(pos_trades) >= 2
+        for t in pos_trades:
+            assert t.lots >= 0.01
+            assert abs(t.lots % 0.01) < 1e-6 or abs(t.lots % 0.01 - 0.01) < 1e-6

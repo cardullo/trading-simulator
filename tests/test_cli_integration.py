@@ -21,16 +21,37 @@ class SimVerifier:
         self.cfg = cfg; self.trades = trades; self.eq = eq; self.errs: list[str] = []
     def _e(self, m: str) -> None: self.errs.append(m)
     def verify_all(self) -> bool:
-        self._vlot(); self._vfee(); self._vchain(); self._vcomp(); self._vout(); self._vanalytics()
+        self._vlot(); self._vfee(); self._vchain(); self._vcomp(); self._vout(); self._vanalytics(); self._vpeak(); self._vnonnegative()
         return len(self.errs) == 0
+    def _vnonnegative(self) -> None:
+        for t in self.trades:
+            if t["balance_after"] < -1e-6:
+                self._e(f"T{t['trade_number']}: negative balance_after {t['balance_after']}")
+    def _vpeak(self) -> None:
+        ib = self.cfg["initial_balance"]
+        running_peak = ib
+        for t in self.trades:
+            prev_peak = running_peak
+            if t["balance_after"] > running_peak:
+                running_peak = t["balance_after"]
+            if running_peak < prev_peak - 1e-6:
+                self._e(f"T{t['trade_number']}: peak balance decreased from {prev_peak} to {running_peak}")
+        if self.eq:
+            prev_peak = self.eq[0].get("peak_balance", ib)
+            for idx, pt in enumerate(self.eq):
+                peak_val = pt.get("peak_balance", 0.0)
+                if peak_val < prev_peak - 1e-6:
+                    self._e(f"Equity snapshot {idx}: peak {peak_val} decreased from {prev_peak}")
+                prev_peak = peak_val
     def _vlot(self) -> None:
         for t in self.trades:
             if t["lots"] < MIN_LOT - 1e-9:
                 self._e(f"T{t['trade_number']}: lots {t['lots']} < min 0.01")
     def _vfee(self) -> None:
+        swap_enabled = self.cfg.get("execution", {}).get("swap_enabled", False)
         for t in self.trades:
             epn = t["pips_gross"] - t["fee_pips"]
-            if abs(t["pips_net"] - epn) > 1e-6:
+            if not swap_enabled and abs(t["pips_net"] - epn) > 1e-6:
                 self._e(f"T{t['trade_number']}: pips_net {t['pips_net']} != pg {t['pips_gross']} - fee {t['fee_pips']}")
             ep = t["pips_net"] * t["lots"] * PIP
             if abs(t["profit_euros"] - ep) > 1e-4:
@@ -54,7 +75,7 @@ class SimVerifier:
         total = len(self.trades)
         if total == 0: return
         awr = len(wins) / total; ewr = self.cfg["win_rate"]
-        if self.cfg.get("outcome_mode") != "bernoulli" and abs(awr - ewr) > 1e-9:
+        if self.cfg.get("outcome_mode") not in ("bernoulli", "custom_pattern") and abs(awr - ewr) > 1e-9:
             self._e(f"WR {awr:.4%} != expected {ewr:.4%}")
     def _vanalytics(self) -> None:
         if not self.trades: return
@@ -272,3 +293,68 @@ class TestCLISimulation:
             json_data = json.load(f)
         assert len(json_data) == 15
         assert json_data[0]["trade_number"] == 1
+
+    def test_t14_ground_truth_hand_calculated(self, tmp_path: Path) -> None:
+        """Phase 5 Task 5.1: Manually calculated ground-truth sequence vs engine execution."""
+        cfg = make_cfg(
+            initial_balance=1000.0,
+            risk_per_trade=0.01,
+            sl_pips=10.0,
+            tp_pips=20.0,
+            fee_pips=1.0,
+            trades_per_day=3,
+            days=1,
+            compounding_mode="standard",
+            outcome_mode="custom_pattern",
+            custom_pattern="WLW",
+            win_rate=2/3,
+            seed=42,
+        )
+        _, trades, _ = self._run_cli(cfg, tmp_path)
+        assert len(trades) == 3
+
+        # Ground-truth hand calculations:
+        # Trade 1 (WIN):
+        # - balance_before = 1000.00
+        # - lots = 1000 * 0.01 / (10 * 10) = 0.10 lots
+        # - pips_net = 20.0 - 1.0 = 19.0
+        # - profit = 19.0 * 0.10 * 10 = +19.00 EUR
+        # - balance_after = 1019.00 EUR
+        t1 = trades[0]
+        assert t1["outcome"] == "WIN"
+        assert math.isclose(t1["balance_before"], 1000.0, abs_tol=1e-4)
+        assert math.isclose(t1["lots"], 0.10, abs_tol=1e-4)
+        assert math.isclose(t1["pips_net"], 19.0, abs_tol=1e-4)
+        assert math.isclose(t1["profit_euros"], 19.0, abs_tol=1e-4)
+        assert math.isclose(t1["balance_after"], 1019.0, abs_tol=1e-4)
+
+        # Trade 2 (LOSS):
+        # - balance_before = 1019.00
+        # - raw lots = (1019 * 0.01) / 100 = 0.1019 -> floor to 0.10 lots
+        # - pips_net = -10.0 - 1.0 = -11.0
+        # - profit = -11.0 * 0.10 * 10 = -11.00 EUR
+        # - balance_after = 1008.00 EUR
+        t2 = trades[1]
+        assert t2["outcome"] == "LOSS"
+        assert math.isclose(t2["balance_before"], 1019.0, abs_tol=1e-4)
+        assert math.isclose(t2["lots"], 0.10, abs_tol=1e-4)
+        assert math.isclose(t2["pips_net"], -11.0, abs_tol=1e-4)
+        assert math.isclose(t2["profit_euros"], -11.0, abs_tol=1e-4)
+        assert math.isclose(t2["balance_after"], 1008.0, abs_tol=1e-4)
+
+        # Trade 3 (WIN):
+        # - balance_before = 1008.00
+        # - raw lots = (1008 * 0.01) / 100 = 0.1008 -> floor to 0.10 lots
+        # - pips_net = 20.0 - 1.0 = 19.0
+        # - profit = 19.0 * 0.10 * 10 = +19.00 EUR
+        # - balance_after = 1027.00 EUR
+        t3 = trades[2]
+        assert t3["outcome"] == "WIN"
+        assert math.isclose(t3["balance_before"], 1008.0, abs_tol=1e-4)
+        assert math.isclose(t3["lots"], 0.10, abs_tol=1e-4)
+        assert math.isclose(t3["pips_net"], 19.0, abs_tol=1e-4)
+        assert math.isclose(t3["profit_euros"], 19.0, abs_tol=1e-4)
+        assert math.isclose(t3["balance_after"], 1027.0, abs_tol=1e-4)
+
+        v = SimVerifier(cfg, trades, [])
+        assert v.verify_all(), "\n".join(v.errs)

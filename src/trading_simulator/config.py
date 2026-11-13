@@ -24,6 +24,11 @@ class OutcomeMode(str, Enum):
     CUSTOM_PATTERN = "custom_pattern"
 
 
+class PricePathMode(str, Enum):
+    LINEAR = "linear"
+    STOCHASTIC = "stochastic"
+
+
 class TakeProfitLevel(BaseModel):
     """A single take-profit level with pips target and allocation percentage."""
 
@@ -35,6 +40,7 @@ class InstrumentConfig(BaseModel):
     symbol: str = "EUR/USD"
     pip_size: Decimal = Decimal("0.0001")
     contract_size: int = 100_000
+    quote_to_account_rate: float = Field(default=1.0, gt=0, description="Exchange rate to convert quote currency to account currency")
 
 
 class AccountConfig(BaseModel):
@@ -77,6 +83,7 @@ class PyramidConfig(BaseModel):
     lot_size: float = Field(default=0.01, gt=0, description="Fixed lots to add per trigger (when lot_mode=fixed)")
     lot_pct: float = Field(default=25.0, gt=0, le=100, description="% of original position to add per trigger (when lot_mode=percent)")
     be_trigger_pips: Optional[float] = Field(default=None, gt=0, description="Unrealized profit to move SL to breakeven (None = disabled)")
+    be_offset_pips: float = Field(default=0.0, ge=0.0, description="Buffer in pips above entry to lock in commissions on breakeven")
 
 
 class ActivityConfig(BaseModel):
@@ -85,6 +92,8 @@ class ActivityConfig(BaseModel):
     days: int = Field(default=30, gt=0)
     outcome_mode: OutcomeMode = OutcomeMode.BERNOULLI
     custom_pattern: Optional[str] = None
+    price_path_mode: PricePathMode = PricePathMode.LINEAR
+    pullback_prob: float = Field(default=0.25, ge=0.0, le=1.0, description="Pullback probability per step in stochastic mode")
 
     @field_validator("custom_pattern")
     @classmethod
@@ -122,6 +131,33 @@ class TPHitConfig(BaseModel):
     hit_pct: float = Field(default=100.0, ge=0, le=100, description="% of TP levels to hit (for RANDOM: probability per level, for PERCENT: exact % of levels)")
 
 
+class LeverageConfig(BaseModel):
+    enabled: bool = False
+    leverage: float = Field(default=500.0, gt=0, description="Account leverage ratio (e.g. 500 for 1:500, 30 for 1:30 ESMA)")
+    margin_call_pct: float = Field(default=100.0, gt=0, description="Margin call level in % (e.g. 100%)")
+    stop_out_pct: float = Field(default=50.0, gt=0, description="Stop out liquidation level in % (e.g. 50% in cTrader)")
+    max_lot_exposure: Optional[float] = Field(default=None, gt=0, description="Maximum total lot exposure permitted")
+
+
+class ExecutionConfig(BaseModel):
+    enabled: bool = False
+    # Variable spread
+    variable_spread_enabled: bool = False
+    base_spread_pips: float = Field(default=0.1, ge=0.0, description="Base raw spread in pips")
+    spread_std_pips: float = Field(default=0.2, ge=0.0, description="Spread volatility standard deviation in pips")
+    # Asymmetric slippage
+    slippage_enabled: bool = False
+    sl_slippage_mean_pips: float = Field(default=0.3, ge=0.0, description="Mean adverse slippage on SL market orders in pips")
+    sl_slippage_std_pips: float = Field(default=0.2, ge=0.0, description="Slippage std dev on SL market orders in pips")
+    tp_slippage_improvement_prob: float = Field(default=0.1, ge=0.0, le=1.0, description="Probability of positive price improvement on TP limits")
+    tp_slippage_mean_pips: float = Field(default=0.1, ge=0.0, description="Mean positive improvement when TP slippage occurs")
+    # Swaps / Financing
+    swap_enabled: bool = False
+    swap_long_pips: float = Field(default=-0.6, description="Overnight financing fee in pips per night for LONG")
+    holding_nights: int = Field(default=0, ge=0, description="Nights position held (0 = intraday/no swap)")
+    triple_swap_day: int = Field(default=3, ge=1, le=7, description="Day of week with 3x swap (3 = Wednesday)")
+
+
 class SimulationConfig(BaseModel):
     instrument: InstrumentConfig = Field(default_factory=InstrumentConfig)
     account: AccountConfig = Field(default_factory=AccountConfig)
@@ -130,6 +166,8 @@ class SimulationConfig(BaseModel):
     pyramid: PyramidConfig = Field(default_factory=PyramidConfig)
     trailing_stop: TrailingStopConfig = Field(default_factory=TrailingStopConfig)
     tp_hit: TPHitConfig = Field(default_factory=TPHitConfig)
+    leverage: LeverageConfig = Field(default_factory=LeverageConfig)
+    execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     seed: Optional[int] = 42
 
     @classmethod

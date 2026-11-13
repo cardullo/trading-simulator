@@ -116,11 +116,20 @@ class TestSolverMath:
         assert ror == 1.0
         ror = _risk_of_ruin(0.6, 3.0, 0.01, 1.0, 10.0)
         assert 0.0 < ror < 1.0
+        # High EV edge case (ev_r >= 1.0) with fractional units must not crash with TypeError / complex
+        ror_high_ev = _risk_of_ruin(0.9, 5.0, 0.03333, 0.0, 10.0)
+        assert 0.0 <= ror_high_ev < 1.0
+        assert isinstance(ror_high_ev, float)
 
     def test_kelly_fraction(self):
         from trading_simulator.solver import _kelly_fraction
+        # win_rate=0.6, b=2.0, fee_pips=1.0, sl_pips=10.0 -> fee_r = 0.1
+        # Kelly with fee: (0.6*2 - 0.4 - 0.1) / 2 = 0.7 / 2 = 0.35
         kelly = _kelly_fraction(0.6, 2.0, 1.0, 10.0)
-        assert 0.0 <= kelly <= 1.0
+        assert abs(kelly - 0.35) < 1e-6
+        # Kelly without fee would be (1.2 - 0.4)/2 = 0.40
+        assert kelly < 0.40
+
         kelly = _kelly_fraction(0.3, 2.0, 1.0, 10.0)
         assert kelly == 0.0
 

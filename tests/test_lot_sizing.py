@@ -24,15 +24,27 @@ class TestCalculateLotSize:
         assert result.rounded is False  # 0.1 is already on 0.01 step
 
     def test_rounding_to_001_step(self):
-        """Raw lots of 0.135 should round to 0.14 (nearest 0.01 step)."""
-        result = calculate_lot_size(
+        """Raw lots of 0.135 should truncate (floor) to 0.13 by default (cTrader/IC Markets),
+        or round to 0.14 when rounding_mode='round'."""
+        result_floor = calculate_lot_size(
             wallet_balance=1000.0,
             risk_per_trade=0.01,
             stop_loss_pips=7.4,  # raw = 10 / (7.4 * 10) = 0.1351...
             pip_value_per_lot=10.0,
+            rounding_mode="floor",
         )
-        assert result.lots == 0.14
-        assert result.rounded is True
+        assert result_floor.lots == 0.13
+        assert result_floor.rounded is True
+
+        result_round = calculate_lot_size(
+            wallet_balance=1000.0,
+            risk_per_trade=0.01,
+            stop_loss_pips=7.4,
+            pip_value_per_lot=10.0,
+            rounding_mode="round",
+        )
+        assert result_round.lots == 0.14
+        assert result_round.rounded is True
 
     def test_min_lot_enforcement(self):
         """Raw lots below 0.01 should be bumped to 0.01."""
@@ -103,19 +115,40 @@ class TestCalculateLotSize:
         assert result.risk_amount == 100.0
 
     def test_rounding_edge_case_exact_half(self):
-        """Raw lots exactly at 0.005 should round to nearest even (banker's)."""
-        # Use a balance that produces raw_lots = 0.135 (rounds to 0.14)
-        # raw = balance * 0.01 / (sl * pip_value)
-        # For raw = 0.135: balance = 0.135 * sl * pip_value / 0.01
-        result = calculate_lot_size(
+        """Raw lots exactly at 0.005 should floor to lower step by default, or round to even if rounding_mode='round'."""
+        result_floor = calculate_lot_size(
             wallet_balance=1350.0,
             risk_per_trade=0.01,
             stop_loss_pips=10.0,
             pip_value_per_lot=10.0,
+            rounding_mode="floor",
         )
-        # raw = 13.5 / 100 = 0.135
-        # round(0.135 / 0.01) * 0.01 = round(13.5) * 0.01 = 14 * 0.01 = 0.14 (banker's: 14 is even)
-        assert result.lots == 0.14
+        # raw = 13.5 / 100 = 0.135 -> floored to 0.13
+        assert result_floor.lots == 0.13
+
+        result_round = calculate_lot_size(
+            wallet_balance=1350.0,
+            risk_per_trade=0.01,
+            stop_loss_pips=10.0,
+            pip_value_per_lot=10.0,
+            rounding_mode="round",
+        )
+        # raw = 0.135 -> rounded to 0.14 (nearest even)
+        assert result_round.lots == 0.14
+
+    def test_floor_vs_round_regression(self):
+        """Task 5.2 regression test: verify floor never exceeds round and never over-allocates risk."""
+        balances = [100.0, 523.0, 1000.0, 1350.0, 9999.0]
+        sl_distances = [5.0, 7.3, 10.0, 15.6, 25.0]
+        for b in balances:
+            for sl in sl_distances:
+                res_floor = calculate_lot_size(b, 0.01, sl, 10.0, rounding_mode="floor")
+                res_round = calculate_lot_size(b, 0.01, sl, 10.0, rounding_mode="round")
+                assert res_floor.lots <= res_round.lots
+                # Risk incurred with floored lots should never exceed risk_amount (unless clamped to min_lot)
+                actual_risk = res_floor.lots * sl * 10.0
+                if not res_floor.min_lot_applied:
+                    assert actual_risk <= res_floor.risk_amount + 1e-9
 
 
 class TestLotSizingResult:

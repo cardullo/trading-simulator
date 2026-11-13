@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass
@@ -25,13 +27,15 @@ def calculate_lot_size(
     min_lot: float = 0.01,
     lot_step: float = 0.01,
     max_lot: float | None = None,
+    rounding_mode: Literal["floor", "round"] = "floor",
 ) -> LotSizingResult:
     """Calculate lot size based on risk % and stop loss distance.
 
     Rules:
     - Risk amount = wallet_balance * risk_per_trade
     - Raw lots = risk_amount / (stop_loss_pips * pip_value_per_lot)
-    - Round to nearest lot_step (0.01 lot granularity)
+    - Truncate (floor) down to nearest lot_step (cTrader / IC Markets convention)
+      or round to nearest lot_step if rounding_mode == "round".
     - Enforce min_lot (default 0.01)
     - Optionally enforce max_lot cap
 
@@ -58,29 +62,37 @@ def calculate_lot_size(
     risk_amount = wallet_balance * risk_per_trade
     raw_lots = risk_amount / (stop_loss_pips * pip_value_per_lot)
 
-    # Round to nearest lot step using Decimal-like precision to avoid float artifacts
-    rounded_lots = round(raw_lots / lot_step) * lot_step
-    rounded_lots = round(rounded_lots, 2)  # 0.01 lot granularity
+    # Truncate / round to nearest lot step
+    if rounding_mode == "floor":
+        # Add small epsilon 1e-9 to avoid IEEE 754 precision issues (e.g. 0.03 / 0.01 = 2.9999999999999996)
+        stepped = math.floor(raw_lots / lot_step + 1e-9) * lot_step
+    elif rounding_mode == "round":
+        stepped = round(raw_lots / lot_step) * lot_step
+    else:
+        raise ValueError(f"Unknown rounding_mode: {rounding_mode}")
+
+    precision = max(2, -int(math.floor(math.log10(lot_step) + 1e-9))) if lot_step < 1.0 else 0
+    stepped = round(stepped, precision)
 
     # Enforce minimum
     min_lot_applied = False
-    if rounded_lots < min_lot:
-        rounded_lots = min_lot
+    if stepped < min_lot:
+        stepped = min_lot
         min_lot_applied = True
 
     # Enforce maximum cap
     max_lot_applied = False
-    if max_lot is not None and rounded_lots > max_lot:
-        rounded_lots = max_lot
+    if max_lot is not None and stepped > max_lot:
+        stepped = max_lot
         max_lot_applied = True
 
     # Final precision cleanup
-    rounded_lots = round(rounded_lots, 2)
+    stepped = round(stepped, precision)
 
-    was_rounded = abs(rounded_lots - raw_lots) > 1e-9
+    was_rounded = abs(stepped - raw_lots) > 1e-9
 
     return LotSizingResult(
-        lots=rounded_lots,
+        lots=stepped,
         risk_amount=risk_amount,
         stop_loss_pips=stop_loss_pips,
         pip_value_per_lot=pip_value_per_lot,

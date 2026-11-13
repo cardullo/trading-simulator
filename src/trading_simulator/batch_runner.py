@@ -11,6 +11,7 @@ from typing import Any
 from trading_simulator.config import (
     CompoundingMode,
     OutcomeMode,
+    PricePathMode,
     PyramidMode,
     SimulationConfig,
     TPHitMode,
@@ -313,6 +314,115 @@ SCENARIOS: dict[str, dict] = {
             "seed": 555,
         },
     },
+    "sim_019_stochastic_trailing_stop": {
+        "name": "Stochastic Price Path with Trailing Stop",
+        "description": "Tests realistic price pullbacks triggering trailing stops before TP target.",
+        "config_overrides": {
+            "account": {"initial_balance": 5000.0, "risk_per_trade": 0.01},
+            "risk": {"sl_pips": 10.0, "tp_pips": 40.0, "fee_pips": 1.0,
+                     "compounding_mode": CompoundingMode.STANDARD},
+            "activity": {"trades_per_day": 10, "win_rate": 0.60, "days": 20,
+                         "outcome_mode": OutcomeMode.BERNOULLI,
+                         "price_path_mode": PricePathMode.STOCHASTIC,
+                         "pullback_prob": 0.30},
+            "pyramid": {"enabled": False},
+            "trailing_stop": {"enabled": True, "activate_pips": 10.0,
+                              "distance_pips": 5.0, "partial_close_pct": 0.0},
+            "tp_hit": {"enabled": False},
+            "seed": 42,
+        },
+    },
+    "sim_020_stochastic_pyramid_trailing": {
+        "name": "Stochastic Pyramid with Trailing Protection",
+        "description": "Tests adversarial combination of pyramid additions, pullbacks, and trailing stops.",
+        "config_overrides": {
+            "account": {"initial_balance": 5000.0, "risk_per_trade": 0.01},
+            "risk": {"sl_pips": 10.0, "tp_pips": 40.0, "fee_pips": 1.0,
+                     "compounding_mode": CompoundingMode.STANDARD},
+            "activity": {"trades_per_day": 5, "win_rate": 0.60, "days": 20,
+                         "outcome_mode": OutcomeMode.BERNOULLI,
+                         "price_path_mode": PricePathMode.STOCHASTIC,
+                         "pullback_prob": 0.25},
+            "pyramid": {"enabled": True, "trigger_pips": 5.0, "max_adds": 2,
+                        "lot_mode": PyramidMode.PERCENT, "lot_pct": 25.0,
+                        "be_trigger_pips": 5.0},
+            "trailing_stop": {"enabled": True, "activate_pips": 12.0,
+                              "distance_pips": 5.0, "partial_close_pct": 0.0},
+            "tp_hit": {"enabled": False},
+            "seed": 77,
+        },
+    },
+    "sim_021_monte_carlo_stress": {
+        "name": "Monte Carlo Multi-Day Stochastic Stress",
+        "description": "Tests multi-day stochastic price excursions with partial closes under high volatility.",
+        "config_overrides": {
+            "account": {"initial_balance": 10000.0, "risk_per_trade": 0.005},
+            "risk": {"sl_pips": 12.0, "tp_pips": 36.0, "fee_pips": 0.5,
+                     "compounding_mode": CompoundingMode.STANDARD},
+            "activity": {"trades_per_day": 20, "win_rate": 0.55, "days": 15,
+                         "outcome_mode": OutcomeMode.BERNOULLI,
+                         "price_path_mode": PricePathMode.STOCHASTIC,
+                         "pullback_prob": 0.35},
+            "pyramid": {"enabled": False},
+            "trailing_stop": {"enabled": True, "activate_pips": 10.0,
+                              "distance_pips": 4.0, "partial_close_pct": 50.0},
+            "tp_hit": {"enabled": False},
+            "seed": 999,
+        },
+    },
+    "sim_022_esma_margin_cap": {
+        "name": "ESMA Regulatory Margin Cap (1:30 Leverage)",
+        "description": "Models European ESMA retail leverage limits (1:30) and free margin requirements.",
+        "config_overrides": {
+            "account": {"initial_balance": 2500.0, "risk_per_trade": 0.02},
+            "risk": {"sl_pips": 15.0, "tp_pips": 45.0, "fee_pips": 0.8,
+                     "compounding_mode": CompoundingMode.STANDARD},
+            "activity": {"trades_per_day": 5, "win_rate": 0.55, "days": 20,
+                         "outcome_mode": OutcomeMode.BERNOULLI},
+            "leverage": {"enabled": True, "leverage": 30.0, "margin_call_pct": 100.0, "stop_out_pct": 50.0},
+            "seed": 101,
+        },
+    },
+    "sim_023_stop_out_liquidation": {
+        "name": "High Leverage Stop-Out Liquidation Protection",
+        "description": "Verifies cTrader broker stop-out liquidation at 50% margin level protects account from negative balance during drawdown.",
+        "config_overrides": {
+            "account": {"initial_balance": 1000.0, "risk_per_trade": 0.30},
+            "risk": {"sl_pips": 40.0, "tp_pips": 80.0, "fee_pips": 1.0,
+                     "compounding_mode": CompoundingMode.STANDARD},
+            "activity": {"trades_per_day": 5, "win_rate": 0.45, "days": 10,
+                         "outcome_mode": OutcomeMode.BERNOULLI},
+            "leverage": {"enabled": True, "leverage": 100.0, "margin_call_pct": 100.0, "stop_out_pct": 50.0},
+            "seed": 202,
+        },
+    },
+    "sim_024_friction_slippage_spread": {
+        "name": "Market Friction: Dynamic Spread, Slippage & Swaps",
+        "description": "Models realistic execution friction matching live IC Markets cTrader raw accounts.",
+        "config_overrides": {
+            "account": {"initial_balance": 5000.0, "risk_per_trade": 0.01},
+            "risk": {"sl_pips": 15.0, "tp_pips": 45.0, "fee_pips": 0.6,
+                     "compounding_mode": CompoundingMode.STANDARD},
+            "activity": {"trades_per_day": 10, "win_rate": 0.55, "days": 15,
+                         "outcome_mode": OutcomeMode.BERNOULLI,
+                         "price_path_mode": PricePathMode.STOCHASTIC,
+                         "pullback_prob": 0.25},
+            "execution": {
+                "enabled": True,
+                "variable_spread_enabled": True,
+                "base_spread_pips": 0.1,
+                "spread_std_pips": 0.15,
+                "slippage_enabled": True,
+                "sl_slippage_mean_pips": 0.3,
+                "sl_slippage_std_pips": 0.1,
+                "swap_enabled": True,
+                "swap_long_pips": -0.5,
+                "holding_nights": 1,
+                "triple_swap_day": 3,
+            },
+            "seed": 303,
+        },
+    },
 }
 
 def create_run_directory(sim_id: str) -> Path:
@@ -491,6 +601,7 @@ def write_performance_summary(result: Any, config: SimulationConfig, run_dir: Pa
     gross_profit = sum(t.profit_euros for t in winning)
     gross_loss = abs(sum(t.profit_euros for t in losing))
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+    risk_base_desc = "current balance" if config.risk.compounding_mode.value == "standard" else "peak balance" if config.risk.compounding_mode.value == "high_water_mark" else "fixed initial balance"
     content = f"""# Performance Summary - €{config.account.initial_balance:,.2f} → €{result.final_balance:,.2f}
 ## Trade Statistics
 - Total Trades: {len(result.trades)}
@@ -519,7 +630,7 @@ def write_performance_summary(result: Any, config: SimulationConfig, run_dir: Pa
 - Actual Trades: {len(result.trades)}
 ## Compounding: {config.risk.compounding_mode.value}
 - Initial Balance: €{config.account.initial_balance:,.2f}
-- Risk Base: {{"current balance" if config.risk.compounding_mode.value == "standard" else "peak balance" if config.risk.compounding_mode.value == "high_water_mark" else "fixed initial balance"}}
+- Risk Base: {risk_base_desc}
 ## Outcome Mode: {config.activity.outcome_mode.value}
 - Win Rate: {config.activity.win_rate:.2%}
 - Seed: {config.seed}

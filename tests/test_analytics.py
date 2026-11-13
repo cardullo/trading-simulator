@@ -5,6 +5,9 @@ from datetime import datetime
 
 from trading_simulator.analytics import (
     PerformanceMetrics,
+    QuantMetrics,
+    compute_quant_metrics,
+    compute_monte_carlo_drawdown,
     aggregate_daily,
     aggregate_weekly,
     aggregate_monthly,
@@ -264,3 +267,57 @@ class TestPerformanceMetrics:
             net_profit=-100.0,
         )
         assert m.is_profitable is False
+
+
+class TestQuantMetrics:
+    """Tests for Sharpe, Sortino, Calmar, CAGR, and Monte Carlo Drawdown."""
+
+    def test_quant_metrics_empty(self):
+        qm = compute_quant_metrics([], initial_balance=1000.0)
+        assert qm.total_trades == 0
+        assert qm.sharpe_ratio == 0.0
+        assert qm.win_rate == 0.0
+
+    def test_quant_metrics_calculation(self):
+        trades = [
+            FakeTrade(day=1, outcome="WIN", profit_euros=30.0, pips_net=30.0, balance_before=1000.0, balance_after=1030.0),
+            FakeTrade(day=1, outcome="WIN", profit_euros=30.0, pips_net=30.0, balance_before=1030.0, balance_after=1060.0),
+            FakeTrade(day=2, outcome="LOSS", profit_euros=-10.0, pips_net=-10.0, balance_before=1060.0, balance_after=1050.0),
+            FakeTrade(day=3, outcome="WIN", profit_euros=30.0, pips_net=30.0, balance_before=1050.0, balance_after=1080.0),
+        ]
+        qm = compute_quant_metrics(trades, initial_balance=1000.0, days=3)
+
+        assert qm.total_trades == 4
+        assert qm.win_rate == 0.75
+        assert qm.average_win_euros == 30.0
+        assert qm.average_loss_euros == 10.0
+        assert qm.payoff_ratio == 3.0
+        # Expectancy: (0.75 * 30) - (0.25 * 10) = 22.5 - 2.5 = 20.0 EUR
+        assert abs(qm.expectancy_euros - 20.0) < 0.01
+        assert qm.profit_factor == 9.0  # 90 / 10
+        assert qm.net_profit_euros == 80.0
+        assert qm.final_balance_euros == 1080.0
+        # Positive returns produce positive Sharpe and Sortino
+        assert qm.sharpe_ratio > 0.0
+        assert qm.sortino_ratio > 0.0
+        assert qm.calmar_ratio > 0.0
+        assert qm.cagr_pct > 0.0
+
+    def test_monte_carlo_drawdown_distribution(self):
+        trades = [
+            FakeTrade(day=1, outcome="WIN", profit_euros=30.0, pips_net=30.0, balance_before=1000.0, balance_after=1030.0),
+            FakeTrade(day=2, outcome="LOSS", profit_euros=-50.0, pips_net=-50.0, balance_before=1030.0, balance_after=980.0),
+            FakeTrade(day=3, outcome="LOSS", profit_euros=-50.0, pips_net=-50.0, balance_before=980.0, balance_after=930.0),
+            FakeTrade(day=4, outcome="WIN", profit_euros=100.0, pips_net=100.0, balance_before=930.0, balance_after=1030.0),
+        ]
+        mc_dd = compute_monte_carlo_drawdown(trades, initial_balance=1000.0, n_simulations=500, seed=42)
+
+        # Monotonicity: median <= p95 <= p99 <= max
+        assert 0.0 <= mc_dd["median_dd_pct"] <= mc_dd["p95_dd_pct"]
+        assert mc_dd["p95_dd_pct"] <= mc_dd["p99_dd_pct"]
+        assert mc_dd["p99_dd_pct"] <= mc_dd["max_dd_pct"]
+
+    def test_monte_carlo_empty(self):
+        mc_dd = compute_monte_carlo_drawdown([], initial_balance=1000.0)
+        assert mc_dd["median_dd_pct"] == 0.0
+        assert mc_dd["max_dd_pct"] == 0.0

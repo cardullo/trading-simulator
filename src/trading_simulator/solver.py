@@ -107,12 +107,28 @@ def _risk_of_ruin(
         return 1.0
 
     units = 1.0 / risk_per_trade
-    try:
-        ror = ((1.0 - ev_r) / (1.0 + ev_r)) ** units
-    except OverflowError:
-        ror = 0.0 if ev_r > 0 else 1.0
+    p = win_rate
+    b = tp_ratio
 
-    return max(0.0, min(1.0, ror))
+    # Solve Ralph Vince / Nauzer Balsara characteristic equation for asymmetric payoffs:
+    # p * z^(b + 1) - z + (1 - p) = 0 for z in (0, 1)
+    # Using bisection for guaranteed numerical stability and monotonic convergence
+    low, high = 0.0, 1.0
+    for _ in range(100):
+        mid = (low + high) / 2.0
+        val = p * (mid ** (b + 1.0)) - mid + (1.0 - p)
+        if val > 0:
+            low = mid
+        else:
+            high = mid
+    z = (low + high) / 2.0
+
+    try:
+        ror = z ** units
+    except (OverflowError, ValueError, ZeroDivisionError):
+        ror = 0.0
+
+    return max(0.0, min(1.0, float(ror)))
 
 
 def _kelly_fraction(
@@ -123,12 +139,13 @@ def _kelly_fraction(
 ) -> float:
     """Kelly optimal fraction to risk per trade.
 
-    f* = (p × b - (1-p)) / b
+    f* = (p × b - (1-p) - fee_r) / b
     """
     b = tp_ratio
     if b <= 0:
         return 0.0
-    numerator = win_rate * b - (1.0 - win_rate)
+    fee_r = fee_pips / sl_pips if sl_pips > 0 else 0.0
+    numerator = win_rate * b - (1.0 - win_rate) - fee_r
     kelly = numerator / b
     return max(0.0, min(1.0, kelly))
 

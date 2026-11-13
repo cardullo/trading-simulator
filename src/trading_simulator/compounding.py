@@ -29,8 +29,11 @@ def compute_risk_base(
     """Compute the risk base for a trade based on compounding mode.
 
     - NONE: risk base = initial_balance (fixed)
-    - STANDARD: risk base = current_balance (dynamic)
+    - STANDARD: risk base = current_balance (dynamic fractional compounding)
     - HIGH_WATER_MARK: risk base = max(peak_balance, current_balance)
+      NOTE: This implements a peak-locked ratchet policy where position sizing
+      compounds up to new equity peaks and maintains that peak risk base during
+      drawdowns (increasing risk as a % of current equity during drawdowns).
     """
     if mode == CompoundingMode.NONE:
         risk_base = initial_balance
