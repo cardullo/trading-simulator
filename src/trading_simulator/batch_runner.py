@@ -220,7 +220,107 @@ SCENARIOS: dict[str, dict] = {
             "seed": 42,
         },
     },
+    "sim_013_micro_account_clamping": {
+        "name": "Micro-Account Lot Clamping",
+        "description": "Tests €50 account with 0.5% risk clamping to broker minimum 0.01 lot.",
+        "config_overrides": {
+            "account": {"initial_balance": 50.0, "risk_per_trade": 0.005},
+            "risk": {"sl_pips": 10.0, "tp_pips": 30.0, "fee_pips": 0.5,
+                     "compounding_mode": CompoundingMode.STANDARD},
+            "activity": {"trades_per_day": 10, "win_rate": 0.55, "days": 30,
+                         "outcome_mode": OutcomeMode.BERNOULLI},
+            "pyramid": {"enabled": False},
+            "trailing_stop": {"enabled": False},
+            "tp_hit": {"enabled": False},
+            "seed": 42,
+        },
+    },
+    "sim_014_extreme_rr_high": {
+        "name": "Extreme High R:R (1:20 Payoff)",
+        "description": "Tests extreme asymmetrical payoff (5 pip SL vs 100 pip TP).",
+        "config_overrides": {
+            "account": {"initial_balance": 10000.0, "risk_per_trade": 0.01},
+            "risk": {"sl_pips": 5.0, "tp_pips": 100.0, "fee_pips": 0.5,
+                     "compounding_mode": CompoundingMode.STANDARD},
+            "activity": {"trades_per_day": 20, "win_rate": 0.20, "days": 30,
+                         "outcome_mode": OutcomeMode.BERNOULLI},
+            "pyramid": {"enabled": False},
+            "trailing_stop": {"enabled": False},
+            "tp_hit": {"enabled": False},
+            "seed": 77,
+        },
+    },
+    "sim_015_extreme_rr_inverted": {
+        "name": "Extreme Inverted R:R (5:1 Scalping)",
+        "description": "Tests high win-rate scalping with deep stops (50 pip SL vs 10 pip TP).",
+        "config_overrides": {
+            "account": {"initial_balance": 10000.0, "risk_per_trade": 0.01},
+            "risk": {"sl_pips": 50.0, "tp_pips": 10.0, "fee_pips": 0.5,
+                     "compounding_mode": CompoundingMode.STANDARD},
+            "activity": {"trades_per_day": 20, "win_rate": 0.88, "days": 30,
+                         "outcome_mode": OutcomeMode.BERNOULLI},
+            "pyramid": {"enabled": False},
+            "trailing_stop": {"enabled": False},
+            "tp_hit": {"enabled": False},
+            "seed": 99,
+        },
+    },
+    "sim_016_trailing_stop_partial_close": {
+        "name": "Trailing Stop with 50% Partial Close",
+        "description": "Tests trailing stop triggering 50% position reduction.",
+        "config_overrides": {
+            "account": {"initial_balance": 5000.0, "risk_per_trade": 0.01},
+            "risk": {"sl_pips": 10.0, "tp_pips": 30.0, "fee_pips": 1.0,
+                     "compounding_mode": CompoundingMode.STANDARD},
+            "activity": {"trades_per_day": 10, "win_rate": 0.60, "days": 30,
+                         "outcome_mode": OutcomeMode.BERNOULLI},
+            "pyramid": {"enabled": False},
+            "trailing_stop": {"enabled": True, "activate_pips": 10.0,
+                              "distance_pips": 5.0, "partial_close_pct": 50.0},
+            "tp_hit": {"enabled": False},
+            "seed": 42,
+        },
+    },
+    "sim_017_pyramid_breakeven_move": {
+        "name": "Pyramid Entry with Breakeven Stop Move",
+        "description": "Tests pyramid additions with automatic breakeven protection.",
+        "config_overrides": {
+            "account": {"initial_balance": 5000.0, "risk_per_trade": 0.01},
+            "risk": {"sl_pips": 10.0, "tp_pips": 30.0, "fee_pips": 1.0,
+                     "compounding_mode": CompoundingMode.STANDARD},
+            "activity": {"trades_per_day": 10, "win_rate": 0.60, "days": 30,
+                         "outcome_mode": OutcomeMode.BERNOULLI},
+            "pyramid": {"enabled": True, "trigger_pips": 5.0, "max_adds": 3,
+                        "lot_mode": PyramidMode.PERCENT, "lot_pct": 25.0,
+                        "be_trigger_pips": 5.0},
+            "trailing_stop": {"enabled": False},
+            "tp_hit": {"enabled": False},
+            "seed": 42,
+        },
+    },
+    "sim_018_high_frequency_burst": {
+        "name": "High-Frequency Burst (500 Trades/Day)",
+        "description": "Tests ultra-high-frequency trading with 2,500 total trades.",
+        "config_overrides": {
+            "account": {"initial_balance": 20000.0, "risk_per_trade": 0.002},
+            "risk": {"sl_pips": 8.0, "tp_pips": 16.0, "fee_pips": 0.2,
+                     "compounding_mode": CompoundingMode.STANDARD},
+            "activity": {"trades_per_day": 500, "win_rate": 0.53, "days": 5,
+                         "outcome_mode": OutcomeMode.BERNOULLI},
+            "pyramid": {"enabled": False},
+            "trailing_stop": {"enabled": False},
+            "tp_hit": {"enabled": False},
+            "seed": 555,
+        },
+    },
 }
+
+def create_run_directory(sim_id: str) -> Path:
+    """Create and return export directory for a simulation scenario."""
+    run_dir = Path("data/exports/simulations") / sim_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
 
 def run_all_simulations() -> None:
     db = DatabaseManager()
@@ -261,17 +361,6 @@ def run_all_simulations() -> None:
     for run in runs:
         print(f"  - {run['run_id']}: balance €{run['final_balance']:,.2f}, "
               f"return {(run['final_balance'] / run['initial_balance'] - 1) * 100:+.2f}%")
-
-
-def write_simulation_config(sim_id: str, config: SimulationConfig, run_dir: Path) -> Path:
-    config_path = run_dir / "simulation_config.json"
-    config_data = {
-        "simulation_id": sim_id,
-        "generated_at": datetime.now().isoformat(),
-        "config": config.to_dict(),
-    }
-    config_path.write_text(json.dumps(config_data, indent=2, default=str))
-    return config_path
 
 
 def write_simulation_config(sim_id: str, config: SimulationConfig, run_dir: Path) -> Path:
@@ -439,93 +528,3 @@ def write_performance_summary(result: Any, config: SimulationConfig, run_dir: Pa
     return readme_path
 
 
-def run_all_simulations() -> None:
-    db = DatabaseManager()
-    print("=" * 70)
-    print("TRADING SIMULATION - BATCH RUNNER")
-    print("=" * 70)
-    print(f"\nTotal scenarios to run: {len(SCENARIOS)}\n")
-    for sim_id, sim_config in SCENARIOS.items():
-        print(f"\n{'='*70}")
-        print(f"Running: {sim_config['name']} ({sim_id})")
-        print(f"{'='*70}")
-        try:
-            cfg = SimulationConfig.from_dict(sim_config["config_overrides"])
-            engine = SimulationEngine(cfg, seed=cfg.seed)
-            result = engine.run(days=cfg.activity.days)
-            run_dir = create_run_directory(sim_id)
-            print(f"  Output directory: {run_dir}")
-            write_simulation_config(sim_id, cfg, run_dir)
-            write_simulation_readme(sim_id, cfg, result, run_dir)
-            write_trade_logs(result, run_dir)
-            write_equity_curve(result, run_dir)
-            write_performance_summary(result, cfg, run_dir)
-            db.save_run(sim_id, cfg, result)
-            print(f"  ✓ Simulation complete: {len(result.trades)} trades, "
-                  f"balance €{result.final_balance:,.2f}, "
-                  f"return {result.total_return_pct:+.2f}%")
-        except Exception as e:
-            print(f"  ✗ ERROR: {e}")
-            import traceback
-            traceback.print_exc()
-    print(f"\n{'='*70}")
-    print("ALL SIMULATIONS COMPLETE")
-    print(f"{'='*70}")
-    print(f"\nOutput directory: data/exports/simulations/")
-    print(f"Database: data/runs.db")
-    runs = db.list_runs()
-    print(f"\nTotal runs in database: {len(runs)}")
-    for run in runs:
-        print(f"  - {run['run_id']}: balance €{run['final_balance']:,.2f}, return {run['final_balance'] / run.get('initial_balance', run['final_balance']) - 1:+.2%}")
-    winning = [t for t in result.trades if t.outcome == "WIN"]
-    losing = [t for t in result.trades if t.outcome == "LOSS"]
-    gross_profit = sum(t.profit_euros for t in winning)
-    gross_loss = abs(sum(t.profit_euros for t in losing))
-    profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
-    readme = f"""# Simulation Run: {sim_id}
-## Overview
-Simulation executed on {datetime.now().isoformat()}.
-## Configuration Summary
-| Parameter | Value |
-|-----------|-------|
-| Initial Balance | €{config.account.initial_balance:,.2f} |
-| Risk per Trade | {config.account.risk_per_trade:.2%} |
-| Stop Loss | {config.risk.sl_pips} pips |
-| Take Profit | {config.risk.tp_pips} pips |
-| Fee per Trade | {config.risk.fee_pips} pips |
-| Compounding Mode | {config.risk.compounding_mode.value} |
-| Trades per Day | {config.activity.trades_per_day} |
-| Win Rate | {config.activity.win_rate:.2%} |
-| Days | {config.activity.days} |
-| Outcome Mode | {config.activity.outcome_mode.value} |
-| Seed | {config.seed} |
-## Results Summary
-| Metric | Value |
-|--------|-------|
-| Total Trades | {len(result.trades)} |
-| Winning Trades | {len(winning)} |
-| Losing Trades | {len(losing)} |
-| Win Rate | {result.win_rate_actual:.2%} |
-| Initial Balance | €{config.account.initial_balance:,.2f} |
-| Final Balance | €{result.final_balance:,.2f} |
-| Total Return | {result.total_return_pct:+.2f}% |
-| Net Profit | €{result.final_balance - config.account.initial_balance:,.2f} |
-| Gross Profit | €{gross_profit:,.2f} |
-| Gross Loss | €{gross_loss:,.2f} |
-| Profit Factor | {profit_factor:.2f} |
-| Max Drawdown | {result.max_drawdown_pct:.2f}% |
-## Files in this Directory
-- `simulation_config.json` - Complete simulation configuration
-- `simulation_readme.md` - This file
-- `trade_log.csv` - Complete trade-by-trade log
-- `trade_log.json` - Trade log in JSON format
-- `equity_curve.csv` - Balance, drawdown, and peak per day
-- `performance_summary.md` - Detailed performance metrics
-## ICMarket/cTrader Compatibility Notes
-- Lot sizing uses 0.01 lot minimum and step (matches ICMarkets/cTrader)
-- Pyramid entry uses VWAP averaging (matches cTrader position averaging)
-- Partial TP closes use FIFO (matches cTrader)
-- Fee applied per trade fill (consistent with ICMarkets commission model)
-"""
-    readme_path.write_text(readme)
-    return readme_path

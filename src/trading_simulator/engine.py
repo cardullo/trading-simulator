@@ -310,7 +310,9 @@ class SimulationEngine:
             direction = -1  # downward toward SL
 
         # Track whether we need deferred P&L calculation (pyramid/trailing only)
-        self._deferred_pnl = self._pyramid_enabled or self._trailing_enabled
+        # When pyramid is enabled, it handles the position with deferred P&L.
+        # When only TP levels are used (without pyramiding), each TP fill realizes P&L immediately.
+        self._deferred_pnl = self._pyramid_enabled or (self._trailing_enabled and not tp_levels)
 
         # Record initial position open fill when M11 features are active
         if self._deferred_pnl:
@@ -345,7 +347,8 @@ class SimulationEngine:
             # Check Take Profit levels
             # Each TP level closes its allocated lots (hit=profit, miss=0 profit)
             # All levels are processed regardless of current price
-            if not position_closed and base_outcome == "WIN" and tp_levels:
+            # Check Take Profit levels (only when pyramid is NOT enabled, since pyramid takes priority)
+            if not position_closed and base_outcome == "WIN" and tp_levels and not self._pyramid_enabled:
                 # Track running balance within the position for sequential balance chaining
                 position_balance_before = self.account.balance
 
@@ -364,16 +367,16 @@ class SimulationEngine:
                             hit_this_level = i in self._tp_levels_to_hit
 
                     # Calculate fill lots: exact allocation
-                    fill_lots = lots * (tp_level.allocation_pct / 100.0)
-                    # Round to broker lot step for both storage and profit calculation
-                    fill_lots = round(fill_lots, 2)
+                    fill_lots = round(lots * (tp_level.allocation_pct / 100.0), 2)
 
+                    fill_fee_pips = self._fee_pips if i == 0 else 0.0
                     if hit_this_level:
                         tp_hits[i] = True
-                        fill_pips = tp_level.pips - self._fee_pips
+                        fill_pips = tp_level.pips - fill_fee_pips
                         profit = fill_pips * fill_lots * self._pip_value_per_lot
                     else:
                         tp_hits[i] = True
+                        fill_fee_pips = 0.0
                         fill_pips = 0.0
                         profit = 0.0
 
@@ -387,7 +390,7 @@ class SimulationEngine:
                         lots=fill_lots,
                         pips_gross=tp_level.pips if hit_this_level else 0.0,
                         pips_net=fill_pips,
-                        fee_pips=self._fee_pips if hit_this_level else 0.0,
+                        fee_pips=fill_fee_pips if hit_this_level else 0.0,
                         profit_euros=profit,
                         entry_price=entry_price,
                         position_avg_price=total_cost_basis / total_lots if total_lots > 0 else entry_price,
@@ -405,7 +408,7 @@ class SimulationEngine:
                     total_cost_basis -= fill_lots * (total_cost_basis / total_lots)
                     total_lots -= fill_lots
 
-                    if remaining_lots <= 0.001:
+                    if i == len(tp_levels) - 1 or remaining_lots <= 0.001:
                         close_price = tp_target_price
                         position_closed = True
                         break
@@ -432,11 +435,12 @@ class SimulationEngine:
                     balance_before_position = running_balance
                     # Now apply profits in order
                     for t in position_trades:
-                        t.pips_gross = round(close_pips - t.entry_price, 2)
-                        t.pips_net = round(t.pips_gross - self._fee_pips, 2)
-                        t.profit_euros = round(t.pips_net * t.lots * self._pip_value_per_lot, 2)
-                        t.balance_before = round(balance_before_position, 2)
-                        t.balance_after = round(balance_before_position + t.profit_euros, 2)
+                        t.pips_gross = round(close_pips - t.entry_price, 4)
+                        t.fee_pips = self._fee_pips
+                        t.pips_net = round(t.pips_gross - t.fee_pips, 4)
+                        t.profit_euros = round(t.pips_net * t.lots * self._pip_value_per_lot, 4)
+                        t.balance_before = round(balance_before_position, 4)
+                        t.balance_after = round(balance_before_position + t.profit_euros, 4)
                         balance_before_position = t.balance_after
                     # Balance is updated at end of _execute_trade (line 669)
                     # to avoid double counting

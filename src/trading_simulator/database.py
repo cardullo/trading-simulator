@@ -54,6 +54,19 @@ class DatabaseManager:
                     balance_before REAL NOT NULL,
                     balance_after REAL NOT NULL,
                     outcome TEXT NOT NULL,
+                    position_id TEXT DEFAULT '',
+                    fill_index INTEGER DEFAULT 0,
+                    total_fills INTEGER DEFAULT 1,
+                    pyramid_fill_index INTEGER DEFAULT 0,
+                    pyramid_total_fills INTEGER DEFAULT 1,
+                    entry_price REAL DEFAULT 0.0,
+                    position_avg_price REAL DEFAULT 0.0,
+                    trailing_stop_active INTEGER DEFAULT 0,
+                    trailing_stop_pips REAL DEFAULT 0.0,
+                    trailing_triggered INTEGER DEFAULT 0,
+                    tp_level_hit INTEGER DEFAULT 1,
+                    tp_level_pips REAL DEFAULT 0.0,
+                    timestamp TEXT DEFAULT '',
                     FOREIGN KEY (run_id) REFERENCES simulation_runs(run_id)
                 );
                 CREATE TABLE IF NOT EXISTS equity_snapshots (
@@ -67,6 +80,27 @@ class DatabaseManager:
                 );
                 """
             )
+            # Migration check for existing trade_logs tables
+            cursor = conn.cursor()
+            existing_cols = {col[1] for col in cursor.execute("PRAGMA table_info(trade_logs)").fetchall()}
+            m11_cols = [
+                ("position_id", "TEXT DEFAULT ''"),
+                ("fill_index", "INTEGER DEFAULT 0"),
+                ("total_fills", "INTEGER DEFAULT 1"),
+                ("pyramid_fill_index", "INTEGER DEFAULT 0"),
+                ("pyramid_total_fills", "INTEGER DEFAULT 1"),
+                ("entry_price", "REAL DEFAULT 0.0"),
+                ("position_avg_price", "REAL DEFAULT 0.0"),
+                ("trailing_stop_active", "INTEGER DEFAULT 0"),
+                ("trailing_stop_pips", "REAL DEFAULT 0.0"),
+                ("trailing_triggered", "INTEGER DEFAULT 0"),
+                ("tp_level_hit", "INTEGER DEFAULT 1"),
+                ("tp_level_pips", "REAL DEFAULT 0.0"),
+                ("timestamp", "TEXT DEFAULT ''"),
+            ]
+            for col_name, col_type in m11_cols:
+                if col_name not in existing_cols:
+                    cursor.execute(f"ALTER TABLE trade_logs ADD COLUMN {col_name} {col_type}")
 
     def save_run(self, run_id: str, config: Any, result: Any) -> None:
         """Save a simulation run and its trades to the database."""
@@ -111,6 +145,19 @@ class DatabaseManager:
                     t.balance_before,
                     t.balance_after,
                     t.outcome,
+                    getattr(t, "position_id", ""),
+                    getattr(t, "fill_index", 0),
+                    getattr(t, "total_fills", 1),
+                    getattr(t, "pyramid_fill_index", 0),
+                    getattr(t, "pyramid_total_fills", 1),
+                    getattr(t, "entry_price", 0.0),
+                    getattr(t, "position_avg_price", 0.0),
+                    1 if getattr(t, "trailing_stop_active", False) else 0,
+                    getattr(t, "trailing_stop_pips", 0.0),
+                    1 if getattr(t, "trailing_triggered", False) else 0,
+                    1 if getattr(t, "tp_level_hit", True) else 0,
+                    getattr(t, "tp_level_pips", 0.0),
+                    t.timestamp.isoformat() if hasattr(t, "timestamp") and hasattr(t.timestamp, "isoformat") else "",
                 )
                 for t in result.trades
             ]
@@ -119,8 +166,11 @@ class DatabaseManager:
                     """
                     INSERT INTO trade_logs
                     (run_id, trade_number, day, lots, risk_amount, pips_gross, pips_net,
-                     fee_pips, profit_euros, balance_before, balance_after, outcome)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     fee_pips, profit_euros, balance_before, balance_after, outcome,
+                     position_id, fill_index, total_fills, pyramid_fill_index, pyramid_total_fills,
+                     entry_price, position_avg_price, trailing_stop_active, trailing_stop_pips,
+                     trailing_triggered, tp_level_hit, tp_level_pips, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     trade_rows,
                 )

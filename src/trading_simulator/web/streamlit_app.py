@@ -17,7 +17,7 @@ def get_db():
     if "db" not in st.session_state:
         st.session_state.db = DatabaseManager(db_path=DB_PATH)
     return st.session_state.db
-def build_config(initial_balance, risk_per_trade, sl_pips, tp_pips, fee_pips, trades_per_day, win_rate, days, compounding, outcome_mode, custom_pattern, seed, pyramid_enabled=False, pyramid_trigger_pips=5.0, pyramid_max_adds=3, pyramid_lot_mode="fixed", pyramid_lot_size=0.01, pyramid_lot_pct=25.0, pyramid_be_trigger_pips=None, trailing_enabled=False, trailing_activate_pips=10.0, trailing_distance_pips=5.0, trailing_partial_close_pct=0.0, tp_hit_enabled=False, tp_hit_mode="fixed", tp_hit_pct=100.0):
+def build_config(initial_balance, risk_per_trade, sl_pips, tp_pips, fee_pips, trades_per_day, win_rate, days, compounding, outcome_mode, custom_pattern, seed, pyramid_enabled=False, pyramid_trigger_pips=5.0, pyramid_max_adds=3, pyramid_lot_mode="fixed", pyramid_lot_size=0.01, pyramid_lot_pct=25.0, pyramid_be_trigger_pips=None, trailing_enabled=False, trailing_activate_pips=10.0, trailing_distance_pips=5.0, trailing_partial_close_pct=0.0, tp_hit_enabled=False, tp_hit_mode="fixed", tp_hit_pct=100.0, tp_levels=None):
     overrides = {}
     if initial_balance: overrides["account"] = {"initial_balance": initial_balance}
     if risk_per_trade: overrides.setdefault("account", {})["risk_per_trade"] = risk_per_trade
@@ -25,6 +25,8 @@ def build_config(initial_balance, risk_per_trade, sl_pips, tp_pips, fee_pips, tr
     overrides.setdefault("risk", {})["tp_pips"] = tp_pips
     overrides.setdefault("risk", {})["fee_pips"] = fee_pips
     overrides.setdefault("risk", {})["compounding_mode"] = compounding
+    if tp_levels:
+        overrides.setdefault("risk", {})["tp_levels"] = tp_levels
     overrides["activity"] = {"trades_per_day": trades_per_day}
     overrides.setdefault("activity", {})["win_rate"] = win_rate
     overrides.setdefault("activity", {})["days"] = days
@@ -158,7 +160,25 @@ def render_sidebar():
     trailing_partial_close = st.sidebar.number_input("Trailing Partial Close (%)", min_value=0.0, max_value=100.0, value=0.0, step=10.0, disabled=not trailing_enabled)
 
     # --- TP Hit Simulation ---
-    st.sidebar.subheader("🎯 TP Hit Simulation")
+    st.sidebar.subheader("🎯 TP Hit Simulation & Partial Exits")
+    use_partial_tp = st.sidebar.checkbox("Enable Partial Take Profit (Scaling Out)", value=False, help="Split exit across multiple TP targets (cTrader / IC Markets deal execution)")
+    tp_levels = None
+    if use_partial_tp:
+        tp_levels_str = st.sidebar.text_area(
+            "TP Levels (JSON)",
+            value='[{"pips": 10.0, "allocation_pct": 50.0}, {"pips": 30.0, "allocation_pct": 50.0}]',
+            help='List of objects with "pips" and "allocation_pct" (must sum to 100%)'
+        )
+        try:
+            parsed = json.loads(tp_levels_str)
+            if isinstance(parsed, list):
+                tp_levels = []
+                for item in parsed:
+                    p = float(item["pips"])
+                    a = float(item.get("allocation_pct", item.get("alloc", 0.0)))
+                    tp_levels.append({"pips": p, "allocation_pct": a})
+        except Exception as e:
+            st.sidebar.error(f"Invalid TP Levels JSON: {e}")
     tp_hit_enabled = st.sidebar.checkbox("Enable TP Hit Simulation", value=False, help="Not all TP levels may be hit")
     tp_hit_mode = st.sidebar.selectbox("TP Hit Mode", ["fixed", "random", "percent"], index=0, disabled=not tp_hit_enabled)
     tp_hit_pct = st.sidebar.number_input("TP Hit %", min_value=0.0, max_value=100.0, value=100.0, step=5.0, disabled=not tp_hit_enabled)
@@ -178,6 +198,7 @@ def render_sidebar():
         "outcome_mode": outcome_mode,
         "custom_pattern": custom_pattern,
         "seed": seed,
+        "tp_levels": tp_levels,
         "pyramid_enabled": pyramid_enabled,
         "pyramid_trigger_pips": pyramid_trigger_pips,
         "pyramid_max_adds": pyramid_max_adds,
@@ -201,13 +222,13 @@ def render_run_tab(inputs):
     col1, col2 = st.columns([2, 1])
     with col1:
         st.subheader("Configuration")
-        for label, value in [("Symbol", "EUR/USD"), ("Initial Balance", f"€{inputs['initial_balance']:,.2f}"), ("Risk per Trade", f"{inputs['risk_per_trade']:.2%}"), ("Stop Loss", f"{inputs['sl_pips']} pips"), ("Take Profit", f"{inputs['tp_pips']} pips"), ("Fee per Trade", f"{inputs['fee_pips']} pips"), ("Compounding", inputs["compounding"].replace("_", " ").title()), ("Outcome Mode", inputs["outcome_mode"].replace("_", " ").title()), ("Trades per Day", str(inputs["trades_per_day"])), ("Win Rate", f"{inputs['win_rate']:.2%}"), ("Days", str(inputs["days"])), ("Seed", str(inputs["seed"]))] + ([("Pyramid Trigger", f"{inputs['pyramid_trigger_pips']} pips"), ("Pyramid Max Adds", str(inputs["pyramid_max_adds"])), ("Pyramid Lot Mode", inputs["pyramid_lot_mode"]), ("Pyramid BE Trigger", f"{inputs['pyramid_be_trigger_pips']} pips" if inputs.get("pyramid_be_trigger_pips") else "disabled")] if inputs.get("pyramid_enabled") else []) + ([("Trailing Activate", f"{inputs['trailing_activate_pips']} pips"), ("Trailing Distance", f"{inputs['trailing_distance_pips']} pips"), ("Trailing Partial Close", f"{inputs['trailing_partial_close_pct']:.0f}%")] if inputs.get("trailing_enabled") else []) + ([("TP Hit Mode", inputs["tp_hit_mode"]), ("TP Hit %", f"{inputs['tp_hit_pct']:.0f}%")] if inputs.get("tp_hit_enabled") else []):
+        for label, value in [("Symbol", "EUR/USD"), ("Initial Balance", f"€{inputs['initial_balance']:,.2f}"), ("Risk per Trade", f"{inputs['risk_per_trade']:.2%}"), ("Stop Loss", f"{inputs['sl_pips']} pips"), ("Take Profit", f"{inputs['tp_pips']} pips"), ("Fee per Trade", f"{inputs['fee_pips']} pips"), ("Compounding", inputs["compounding"].replace("_", " ").title()), ("Outcome Mode", inputs["outcome_mode"].replace("_", " ").title()), ("Trades per Day", str(inputs["trades_per_day"])), ("Win Rate", f"{inputs['win_rate']:.2%}"), ("Days", str(inputs["days"])), ("Seed", str(inputs["seed"]))] + ([("Partial TP Levels", ", ".join(f"{lvl['allocation_pct']:.0f}% @ {lvl['pips']}p" for lvl in inputs['tp_levels']))] if inputs.get("tp_levels") else []) + ([("Pyramid Trigger", f"{inputs['pyramid_trigger_pips']} pips"), ("Pyramid Max Adds", str(inputs["pyramid_max_adds"])), ("Pyramid Lot Mode", inputs["pyramid_lot_mode"]), ("Pyramid BE Trigger", f"{inputs['pyramid_be_trigger_pips']} pips" if inputs.get("pyramid_be_trigger_pips") else "disabled")] if inputs.get("pyramid_enabled") else []) + ([("Trailing Activate", f"{inputs['trailing_activate_pips']} pips"), ("Trailing Distance", f"{inputs['trailing_distance_pips']} pips"), ("Trailing Partial Close", f"{inputs['trailing_partial_close_pct']:.0f}%")] if inputs.get("trailing_enabled") else []) + ([("TP Hit Mode", inputs["tp_hit_mode"]), ("TP Hit %", f"{inputs['tp_hit_pct']:.0f}%")] if inputs.get("tp_hit_enabled") else []):
             st.write(f"**{label}:** {value}")
     with col2:
         st.subheader("Action")
         if inputs["run_button"]:
             try:
-                config = build_config(inputs["initial_balance"], inputs["risk_per_trade"], inputs["sl_pips"], inputs["tp_pips"], inputs["fee_pips"], inputs["trades_per_day"], inputs["win_rate"], inputs["days"], inputs["compounding"], inputs["outcome_mode"], inputs["custom_pattern"], inputs["seed"], pyramid_enabled=inputs.get("pyramid_enabled", False), pyramid_trigger_pips=inputs.get("pyramid_trigger_pips", 5.0), pyramid_max_adds=inputs.get("pyramid_max_adds", 3), pyramid_lot_mode=inputs.get("pyramid_lot_mode", "fixed"), pyramid_lot_size=inputs.get("pyramid_lot_size", 0.01), pyramid_lot_pct=inputs.get("pyramid_lot_pct", 25.0), pyramid_be_trigger_pips=inputs.get("pyramid_be_trigger_pips"), trailing_enabled=inputs.get("trailing_enabled", False), trailing_activate_pips=inputs.get("trailing_activate_pips", 10.0), trailing_distance_pips=inputs.get("trailing_distance_pips", 5.0), trailing_partial_close_pct=inputs.get("trailing_partial_close_pct", 0.0), tp_hit_enabled=inputs.get("tp_hit_enabled", False), tp_hit_mode=inputs.get("tp_hit_mode", "fixed"), tp_hit_pct=inputs.get("tp_hit_pct", 100.0))
+                config = build_config(inputs["initial_balance"], inputs["risk_per_trade"], inputs["sl_pips"], inputs["tp_pips"], inputs["fee_pips"], inputs["trades_per_day"], inputs["win_rate"], inputs["days"], inputs["compounding"], inputs["outcome_mode"], inputs["custom_pattern"], inputs["seed"], pyramid_enabled=inputs.get("pyramid_enabled", False), pyramid_trigger_pips=inputs.get("pyramid_trigger_pips", 5.0), pyramid_max_adds=inputs.get("pyramid_max_adds", 3), pyramid_lot_mode=inputs.get("pyramid_lot_mode", "fixed"), pyramid_lot_size=inputs.get("pyramid_lot_size", 0.01), pyramid_lot_pct=inputs.get("pyramid_lot_pct", 25.0), pyramid_be_trigger_pips=inputs.get("pyramid_be_trigger_pips"), trailing_enabled=inputs.get("trailing_enabled", False), trailing_activate_pips=inputs.get("trailing_activate_pips", 10.0), trailing_distance_pips=inputs.get("trailing_distance_pips", 5.0), trailing_partial_close_pct=inputs.get("trailing_partial_close_pct", 0.0), tp_hit_enabled=inputs.get("tp_hit_enabled", False), tp_hit_mode=inputs.get("tp_hit_mode", "fixed"), tp_hit_pct=inputs.get("tp_hit_pct", 100.0), tp_levels=inputs.get("tp_levels"))
                 _, result, run_id = run_simulation(config, inputs["seed"])
                 st.session_state["last_run_id"] = run_id
                 st.session_state["last_result"] = result

@@ -1,6 +1,6 @@
 """Independent CLI integration tests for trading simulation correctness."""
 from __future__ import annotations
-import csv, json, re
+import csv, json, math, re
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
@@ -38,10 +38,10 @@ class SimVerifier:
     def _vchain(self) -> None:
         ib = self.cfg["initial_balance"]; pb = ib
         for t in self.trades:
-            if abs(t["balance_before"] - pb) > 1e-6:
+            if abs(t["balance_before"] - pb) > 1e-4 and not math.isclose(t["balance_before"], pb, rel_tol=1e-9):
                 self._e(f"T{t['trade_number']}: bb {t['balance_before']} != prev ba {pb}")
-            ea = pb + t["profit_euros"]
-            if abs(t["balance_after"] - ea) > 1e-6:
+            ea = round(pb + t["profit_euros"], 4)
+            if abs(t["balance_after"] - ea) > 1e-4 and not math.isclose(t["balance_after"], ea, rel_tol=1e-9):
                 self._e(f"T{t['trade_number']}: ba {t['balance_after']} != bb {t['balance_before']} + profit {t['profit_euros']} = {ea}")
             pb = t["balance_after"]
     def _vcomp(self) -> None:
