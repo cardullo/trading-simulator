@@ -192,9 +192,10 @@ class SimulationEngine:
         close_price: float,
         tp_level_hit: bool = True,
         tp_level_pips: float = 0.0,
+        balance_before_override: float | None = None,
     ) -> None:
         """Record a single fill (partial or full position exit/add)."""
-        balance_before = self.account.balance
+        balance_before = balance_before_override if balance_before_override is not None else self.account.balance
 
         # Round balance_before to prevent floating point drift
         balance_before = round(balance_before, 4)
@@ -345,6 +346,9 @@ class SimulationEngine:
             # Each TP level closes its allocated lots (hit=profit, miss=0 profit)
             # All levels are processed regardless of current price
             if not position_closed and base_outcome == "WIN" and tp_levels:
+                # Track running balance within the position for sequential balance chaining
+                position_balance_before = self.account.balance
+
                 for i, tp_level in enumerate(tp_levels):
                     if tp_hits[i]:
                         continue  # Already processed
@@ -359,7 +363,10 @@ class SimulationEngine:
                         elif self._tp_hit_mode == TPHitMode.PERCENT:
                             hit_this_level = i in self._tp_levels_to_hit
 
-                    fill_lots = round(lots * (tp_level.allocation_pct / 100.0), 2)
+                    # Calculate fill lots: exact allocation
+                    fill_lots = lots * (tp_level.allocation_pct / 100.0)
+                    # Round to broker lot step for both storage and profit calculation
+                    fill_lots = round(fill_lots, 2)
 
                     if hit_this_level:
                         tp_hits[i] = True
@@ -388,7 +395,11 @@ class SimulationEngine:
                         tp_level_hit=hit_this_level,
                         tp_level_pips=tp_level.pips,
                         close_price=tp_target_price,
+                        balance_before_override=position_balance_before,
                     )
+
+                    # Update running balance for next fill in this position
+                    position_balance_before = round(position_balance_before + profit, 4)
 
                     remaining_lots -= fill_lots
                     total_cost_basis -= fill_lots * (total_cost_basis / total_lots)
@@ -427,8 +438,8 @@ class SimulationEngine:
                         t.balance_before = round(balance_before_position, 2)
                         t.balance_after = round(balance_before_position + t.profit_euros, 2)
                         balance_before_position = t.balance_after
-                    # Update account balance to reflect final position result
-                    self.account.balance = balance_before_position
+                    # Balance is updated at end of _execute_trade (line 669)
+                    # to avoid double counting
                 else:
                     close_pips_net = close_pips - self._fee_pips
                     profit = close_pips_net * total_lots * self._pip_value_per_lot
@@ -666,13 +677,13 @@ class SimulationEngine:
             )
             close_price = current_price
 
-        if not self._deferred_pnl:
-            position_profit = sum(
-                t.profit_euros
-                for t in self.trades
-                if t.position_id == position_id
-            )
-            self.account.balance += position_profit
+        # Always update account balance with position profit (win or loss)
+        position_profit = sum(
+            t.profit_euros
+            for t in self.trades
+            if t.position_id == position_id
+        )
+        self.account.balance += position_profit
         if self.account.balance > self.account.peak_balance:
             self.account.peak_balance = self.account.balance
 
