@@ -7,7 +7,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class CompoundingMode(str, Enum):
@@ -95,6 +95,12 @@ class ActivityConfig(BaseModel):
             if not all(c in ("W", "L") for c in v.upper()):
                 raise ValueError("custom_pattern must contain only 'W' and 'L' characters")
         return v
+
+    @model_validator(mode="after")
+    def _validate_outcome_mode_consistency(self) -> "ActivityConfig":
+        if self.outcome_mode == OutcomeMode.CUSTOM_PATTERN and not self.custom_pattern:
+            raise ValueError("custom_pattern must be specified when outcome_mode is custom_pattern")
+        return self
 
 
 class TrailingStopConfig(BaseModel):

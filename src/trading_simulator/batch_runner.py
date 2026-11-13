@@ -222,10 +222,45 @@ SCENARIOS: dict[str, dict] = {
     },
 }
 
-def create_run_directory(sim_id: str) -> Path:
-    run_dir = Path(f"data/exports/simulations/{sim_id}")
-    run_dir.mkdir(parents=True, exist_ok=True)
-    return run_dir
+def run_all_simulations() -> None:
+    db = DatabaseManager()
+    print("=" * 70)
+    print("TRADING SIMULATION - BATCH RUNNER")
+    print("=" * 70)
+    print(f"\nTotal scenarios to run: {len(SCENARIOS)}\n")
+    for sim_id, sim_config in SCENARIOS.items():
+        print(f"\n{'='*70}")
+        print(f"Running: {sim_config['name']} ({sim_id})")
+        print(f"{'='*70}")
+        try:
+            cfg = SimulationConfig.from_dict(sim_config["config_overrides"])
+            engine = SimulationEngine(cfg, seed=cfg.seed)
+            result = engine.run(days=cfg.activity.days)
+            run_dir = create_run_directory(sim_id)
+            print(f"  Output directory: {run_dir}")
+            write_simulation_config(sim_id, cfg, run_dir)
+            write_simulation_readme(sim_id, cfg, result, run_dir)
+            write_trade_logs(result, run_dir)
+            write_equity_curve(result, run_dir)
+            write_performance_summary(result, cfg, run_dir)
+            db.save_run(sim_id, cfg, result)
+            print(f"  ✓ Simulation complete: {len(result.trades)} trades, "
+                  f"balance €{result.final_balance:,.2f}, "
+                  f"return {result.total_return_pct:+.2f}%")
+        except Exception as e:
+            print(f"  ✗ ERROR: {e}")
+            import traceback
+            traceback.print_exc()
+    print(f"\n{'='*70}")
+    print("ALL SIMULATIONS COMPLETE")
+    print(f"{'='*70}")
+    print(f"\nOutput directory: data/exports/simulations/")
+    print(f"Database: data/runs.db")
+    runs = db.list_runs()
+    print(f"\nTotal runs in database: {len(runs)}")
+    for run in runs:
+        print(f"  - {run['run_id']}: balance €{run['final_balance']:,.2f}, "
+              f"return {(run['final_balance'] / run['initial_balance'] - 1) * 100:+.2f}%")
 
 
 def write_simulation_config(sim_id: str, config: SimulationConfig, run_dir: Path) -> Path:
